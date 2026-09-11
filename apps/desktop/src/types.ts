@@ -1,0 +1,11 @@
+export type Hardware={cpu_model:string;logical_cpu_cores:number;memory_bytes:number;available_memory_bytes:number;machine:string};
+export type Capture={capture:string;bag_bytes:number;bag_duration_s:number;photos:number;lidar_frames:number;imu_samples:number;device:{device_model:string;lidar_model:string;work_duration:number};cameras:Record<string,{width:number;height:number}>};
+export type Inspection={capture:Capture;hardware:Hardware;estimate:{estimated_seconds:number|null;range_seconds:[number,number]|null;confidence:string;candidate_file_bytes:number}};
+export type Job={capture:string;output:string;resources:string;memory_gb:number;color:boolean;mask:string;exposure:string;pose_refinement:boolean;resume:boolean};
+export type PipelineEvent={event:string;stage?:string;done?:number;total?:number;wall_s?:number;rss_bytes?:number;cpu_core_equivalents?:number|null;system_available_memory_bytes?:number;message?:string;run_id:string;metal?:{gpu_command_s:number;allocated_buffer_bytes:number}};
+export type Preview={key:string;name:string;source:string;source_points:number;display_points:number;origin:number[];bounds:number[][];bytes:number};
+export type Cloud={info:Preview;data:Float32Array};
+export const STAGES=[['decode','Decode LiDAR + IMU'],['pack','Validate + pack'],['tracking','Track + deskew'],['pose_refinement','Refine poses'],['registered','Stage scan frames'],['geometry','Metal geometry'],['photos','Extract photos'],['cameras','Calibrate cameras'],['masks','Person masks'],['candidates','Visibility candidates'],['global','Global exposure'],['local','Local exposure'],['blend','Consensus blend'],['export','Export colored LAS']] as const;
+export function stagesFor(job:Pick<Job,'color'|'pose_refinement'|'mask'|'exposure'>){return STAGES.filter(([id])=>!(!job.pose_refinement&&id==='pose_refinement')&&!(!job.color&&['photos','cameras','masks','candidates','global','local','blend','export'].includes(id))&&!(job.mask==='off'&&id==='masks')&&!(job.exposure==='off'&&['global','local'].includes(id))&&!(job.exposure!=='local'&&id==='local'));}
+export const seconds=(value:number|null|undefined)=>value==null?'—':value<60?`${value.toFixed(1)} s`:`${Math.floor(value/60)}m ${Math.round(value%60)}s`;
+export const bytes=(value:number|undefined)=>value==null?'—':value>=1e9?`${(value/1e9).toFixed(1)} GB`:`${(value/1e6).toFixed(0)} MB`;

@@ -1,0 +1,7 @@
+include README.md requirements-macos.lock
+recursive-include native *.cpp *.hpp *.mm *.metal CMakeLists.txt
+recursive-include docs *.md *.json
+recursive-include licenses *.txt
+recursive-include examples *.md
+recursive-include tools *.py
+recursive-include tests *.py

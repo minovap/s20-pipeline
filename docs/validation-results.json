@@ -1,0 +1,183 @@
+{
+  "date": "2026-09-11",
+  "reference_color": {
+    "points": 5027200,
+    "max_xyz_difference_m": 5.329070518200751e-15,
+    "max_rgb_difference_16bit": 0,
+    "result_sha256": "34833b6306a21fefc43c90ae01c68bbec11f17f356032ef82174e9355ae51afe",
+    "reference_sha256": "9f9393d6541db540fa9861de0e510b492ad843b42810244106ef1ee4db5da072",
+    "pass": true,
+    "note": "LAS headers/offsets may differ; compares all decoded coordinates and color values in order."
+  },
+  "raw_input_preserved": true,
+  "raw_result": {
+    "input_points": 6136485,
+    "colored_points": 6024829,
+    "blended_points": 5607857,
+    "source_sha256": "d0e7fd54e53f175632984931708dff7b19a568d2b36840b34f18a6ba2c25c41c",
+    "output_sha256": "6c0c41373ddd5bea23c8800c240080a086bb8bd3ed5923fe81e022158b393ac1",
+    "coordinate_quantization_m": 0.0001
+  },
+  "stages": [
+    {
+      "stage": "blend",
+      "wall_s": 1.0386988329992164,
+      "sampled_peak_tree_rss_bytes": 855588864,
+      "cpu_seconds": 0.58939599999999,
+      "average_cpu_cores": 0.5674368558768128,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null,
+      "metal": {
+        "points": 6136485,
+        "device": "Apple M4 Max",
+        "allocated_buffer_bytes": 883689552,
+        "gpu_command_s": 0.018844958336558193,
+        "threads_per_group": 256,
+        "fast_math": false
+      }
+    },
+    {
+      "stage": "cameras",
+      "wall_s": 0.5198004590056371,
+      "sampled_peak_tree_rss_bytes": 11157504,
+      "cpu_seconds": 0.06501500000001315,
+      "average_cpu_cores": 0.12507684222592824,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "candidates",
+      "wall_s": 23.843784208002035,
+      "sampled_peak_tree_rss_bytes": 2662072320,
+      "cpu_seconds": 54.20756499999999,
+      "average_cpu_cores": 2.273446384479851,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "decode",
+      "wall_s": 0.5182992499903776,
+      "sampled_peak_tree_rss_bytes": 11337728,
+      "cpu_seconds": 0.47291300000000003,
+      "average_cpu_cores": 0.9124323448447588,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "export",
+      "wall_s": 1.0387524170218967,
+      "sampled_peak_tree_rss_bytes": 1368702976,
+      "cpu_seconds": 0.552607000000009,
+      "average_cpu_cores": 0.531991060568921,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "geometry",
+      "wall_s": 31.594941375020426,
+      "sampled_peak_tree_rss_bytes": 7395475456,
+      "cpu_seconds": 37.182356,
+      "average_cpu_cores": 1.1768452284389137,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "global",
+      "wall_s": 1.038366542023141,
+      "sampled_peak_tree_rss_bytes": 1068318720,
+      "cpu_seconds": 0.6588740000000186,
+      "average_cpu_cores": 0.6345293047638808,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "local",
+      "wall_s": 1.5772142919886392,
+      "sampled_peak_tree_rss_bytes": 1146601472,
+      "cpu_seconds": 1.5533709999999807,
+      "average_cpu_cores": 0.9848826553818534,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "masks",
+      "wall_s": 7.263266125024529,
+      "sampled_peak_tree_rss_bytes": 1442988032,
+      "cpu_seconds": 6.687576999999996,
+      "average_cpu_cores": 0.9207396348811893,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "pack",
+      "wall_s": 1.0292725409963168,
+      "sampled_peak_tree_rss_bytes": 44793856,
+      "cpu_seconds": 0.5966700000000001,
+      "average_cpu_cores": 0.5797006878493374,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "photos",
+      "wall_s": 0.5210287079971749,
+      "sampled_peak_tree_rss_bytes": 11108352,
+      "cpu_seconds": 0.2713969999999861,
+      "average_cpu_cores": 0.5208868452627713,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "pose_refinement",
+      "wall_s": 1.5681659170077182,
+      "sampled_peak_tree_rss_bytes": 283197440,
+      "cpu_seconds": 8.722979999999996,
+      "average_cpu_cores": 5.56253640344682,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "registered",
+      "wall_s": 5.239167666994035,
+      "sampled_peak_tree_rss_bytes": 52756480,
+      "cpu_seconds": 1.867200000000004,
+      "average_cpu_cores": 0.35639248802115686,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    },
+    {
+      "stage": "tracking",
+      "wall_s": 8.834109499992337,
+      "sampled_peak_tree_rss_bytes": 4660494336,
+      "cpu_seconds": 72.10736000000001,
+      "average_cpu_cores": 8.162380147094913,
+      "sampling_interval_s": 0.5,
+      "gpu_utilization_percent": null
+    }
+  ],
+  "source_note": "Original S20 indoor SD-card capture; path and raw assets intentionally excluded from repository.",
+  "limitations": [
+    "Raw end-to-end timing excludes initial input hashing.",
+    "Fresh full-frame geometry has not been visually approved against Studio.",
+    "Only the matched-input color regression proves parity with accepted color output."
+  ],
+  "cpu_resource_limit_check": {
+    "points": 6136485,
+    "full_cpu_default_sha256": "d0e7fd54e53f175632984931708dff7b19a568d2b36840b34f18a6ba2c25c41c",
+    "cpu_two_thread_sha256": "28485f8e3ac880a8de3d8ad10cd23e46b52deec00fe351402dd47b6d3e5ed243",
+    "byte_identical": false,
+    "field_max_abs_difference": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.0,
+      "normal_x": 0.0,
+      "normal_y": 0.0,
+      "normal_z": 0.0,
+      "intensity": 0.0,
+      "gps_time": 0.0,
+      "frame": 0.0,
+      "ray_noise_score": 7.62939453125e-06
+    },
+    "geometry_normals_intensity_time_and_frame_identical": true,
+    "note": "Only diagnostic ray noise scores differ, at most 7.63e-6; retained points and normals are exactly equal. No byte-level determinism claim for the geometry GPU score reduction."
+  }
+}

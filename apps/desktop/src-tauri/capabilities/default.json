@@ -1,0 +1,1 @@
+{"identifier":"main-capability","description":"Local job controls and explicit file dialogs","windows":["main"],"permissions":["core:default","dialog:allow-open"]}
