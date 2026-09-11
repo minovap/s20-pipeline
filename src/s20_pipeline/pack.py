@@ -37,7 +37,7 @@ Loader.add_constructor(
 )
 
 
-def pack(source, calibration, out):
+def pack(source, calibration, out, progress=lambda *args: None):
     if out.exists():
         raise FileExistsError("Use a fresh package directory")
     cal = yaml.load(calibration.read_text().replace("%YAML:1.0", ""), Loader=Loader)
@@ -117,7 +117,9 @@ def pack(source, calibration, out):
             )
         )
         f.write(np.asarray(imu, dtype="<f8").tobytes())
-        for frame, path in zip(frames, paths):
+        for number, (frame, path) in enumerate(zip(frames, paths), 1):
+            if number % 50 == 0 or number == len(frames):
+                progress(number, len(frames), "frames")
             a = np.load(path)
             b = np.zeros(len(a), dtype=POINT)
             for key in POINT.names:

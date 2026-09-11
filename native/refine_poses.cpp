@@ -5,6 +5,8 @@
 #include <tbb/parallel_for.h>
 #include <tbb/global_control.h>
 #include <iomanip>
+#include <atomic>
+#include <mutex>
 #include <iostream>
 #include "observations.hpp"
 using V=Eigen::Vector3d;using M=Eigen::Matrix3d;using Pose=Sophus::SE3d;using Key=kiss_icp::Voxel;
@@ -42,7 +44,9 @@ int main(int argc,char**argv){try{
  for(const auto&s:scans){auto&map=cells[(s.h.frame/10)%3];for(const auto&l:s.train){V p=s.h.pose*l;auto&c=map[key(p,mapGrid)];c.sum+=p;c.outer.noalias()+=p*p.transpose();++c.count;if(c.last!=s.h.frame){c.last=s.h.frame;++c.frames;}}}
  std::array<Map,3>maps;for(int group=0;group<3;++group)for(const auto&item:cells[group]){const auto&c=item.second;if(c.count<8||c.frames<3)continue;V mean=c.sum/c.count;M cov=c.outer/c.count-mean*mean.transpose();Eigen::SelfAdjointEigenSolver<M> e(cov);if(e.info()!=Eigen::Success)continue;auto v=e.eigenvalues();if(v[1]<1e-6||v[0]>.10*v[1]||v[1]<.05*v[2])continue;maps[group].planes.insert({item.first,{mean,e.eigenvectors().col(0),1.-std::max(0.,v[0]/v[1])}});}
  std::vector<Result>results(scans.size());
- tbb::parallel_for(size_t(0),scans.size(),[&](size_t i){const auto&s=scans[i];const auto&map=maps[((s.h.frame/10)%3+1)%3];const auto&heldmap=maps[((s.h.frame/10)%3+2)%3];auto&result=results[i];result.pose=s.h.pose;
+ std::atomic<size_t> refined{0};std::mutex progress_mutex;
+ tbb::parallel_for(size_t(0),scans.size(),[&](size_t i){
+  struct Done{std::atomic<size_t>&n;size_t total;std::mutex&m;~Done(){size_t k=++n;if(k%50==0||k==total){std::lock_guard<std::mutex> lock(m);std::cout<<"refined "<<k<<"/"<<total<<" scans"<<std::endl;}}} done{refined,scans.size(),progress_mutex};const auto&s=scans[i];const auto&map=maps[((s.h.frame/10)%3+1)%3];const auto&heldmap=maps[((s.h.frame/10)%3+2)%3];auto&result=results[i];result.pose=s.h.pose;
   auto original=matches(s.train,s.h.pose,map);result.matches=original.size();result.train_before=cost(original,s.h.pose);
   auto held=matches(s.held,s.h.pose,heldmap);result.held_before_count=held.size();result.held_before=medianResidual(held,s.h.pose);
   // Anchor first frame; underconstrained frames retain their original pose.

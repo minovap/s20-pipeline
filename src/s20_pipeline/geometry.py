@@ -39,7 +39,7 @@ def _convert(path, destination, lookup):
     return header["origin_ns"], pose
 
 
-def stage_registered(observations, destination, revised=None):
+def stage_registered(observations, destination, revised=None, progress=lambda *args: None):
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "SCANS").mkdir()
     lookup = {int(r[0]): r for r in np.atleast_2d(np.loadtxt(revised))} if revised else None
@@ -57,6 +57,8 @@ def stage_registered(observations, destination, revised=None):
                 raise ValueError("Mixed observation clock origins")
             origin = frame_origin
             rows.append(pose)
+            if len(rows) % 50 == 0 or len(rows) == len(paths):
+                progress(len(rows), len(paths), "frames")
     if not rows:
         raise ValueError("No native observations")
     np.savetxt(

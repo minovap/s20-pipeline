@@ -427,3 +427,35 @@ def test_candidate_worker_keeps_exact_and_routes_fast_mode(tmp_path, monkeypatch
     job["options"]["keyframe_percent"] = 20
     execute("candidates", job)
     assert calls[2][2]["keyframe_percent"] == 20
+
+def test_native_progress_lines_become_events(tmp_path):
+    from s20_pipeline.runner import stage_progress_parser
+
+    (tmp_path / "registered").mkdir()
+    (tmp_path / "registered/metadata.json").write_text('{"frames": 100}')
+    tracking = stage_progress_parser("tracking", tmp_path)
+    assert tracking("4700/10972 frames; 130.9s; position 5.4 -17.9 -0.5") == {
+        "done": 4700,
+        "total": 10972,
+        "unit": "frames",
+    }
+    assert tracking("Saved 20081995 points in 37 seconds") is None
+    geometry = stage_progress_parser("geometry", tmp_path)
+    assert geometry("Loaded 25 frames, 400000 points") == {
+        "done": 25,
+        "total": 100,
+        "unit": "frames",
+        "phase": "loading",
+    }
+    assert geometry("Ray subfiles total=3 points=1000")["total"] == 1000
+    assert geometry("Ray subfile [0,0,0] points=600") is None
+    assert geometry("Ray subfile [0,0,0] wrote=500")["done"] == 600
+    assert geometry("Ray subfile [1,0,0] points=40 skipped (sparse)")["done"] == 640
+    assert geometry("Ray subfile [2,0,0] points=360") is None
+    assert geometry("Ray subfile [2,0,0] wrote=300") == {
+        "done": 1000,
+        "total": 1000,
+        "unit": "points",
+        "phase": "filtering",
+    }
+    assert stage_progress_parser("cameras", tmp_path)("anything") is None

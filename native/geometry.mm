@@ -2270,6 +2270,11 @@ FilterResult run_partitioned_filter(
     bool ray_only
 ) {
     std::map<std::array<int, 3>, size_t> subfile_counts = list_ray_subfiles(cloud);
+    {
+        size_t total_points = 0;
+        for (const auto &entry : subfile_counts) total_points += entry.second;
+        std::cerr << "Ray subfiles total=" << subfile_counts.size() << " points=" << total_points << "\n";
+    }
     FilterResult aggregate;
     aggregate.input_points = cloud.points.size();
     Cloud combined;

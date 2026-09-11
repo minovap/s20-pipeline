@@ -1,11 +1,12 @@
 // Build-pipeline style step list. The running step is kept in the vertical
 // centre of the scroll area; times never show fractions of a second.
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {Check, ChevronDown, ChevronRight, Minus, X} from 'lucide-react';
 import {STAGES, stageLabel} from './types';
-import type {StageState} from './types';
-import {bytes, duration} from './format';
+import type {RunSize, StageState} from './types';
+import {bytes, count, duration} from './format';
 import {Spinner} from './ui';
+import {leftText, loadHistory, remainingFor, remainingTotal} from './timing';
 
 export type PipelineProps = {
   stages: StageState[];            // ordered: every step this run will do
@@ -15,11 +16,22 @@ export type PipelineProps = {
   error?: string | null;
   cpu?: number | null;             // core equivalents while running
   memory?: number | null;          // rss bytes while running
+  size?: RunSize;                  // scan size, for time predictions
   onShowLog?: (stage: string) => Promise<string>;
 };
 
-export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, memory, onShowLog}: PipelineProps) {
+const formatProgress = (s: StageState) => {
+  if (!s.total) return '';
+  const value = s.unit === 'bytes' ? `${bytes(s.done)} of ${bytes(s.total)}` : `${count(s.done)} of ${count(s.total)}${s.unit ? ` ${s.unit}` : ''}`;
+  return s.phase ? `${s.phase}, ${value}` : value;
+};
+
+export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, memory, size, onShowLog}: PipelineProps) {
   const [now, setNow] = useState(Date.now());
+  const history = useMemo(loadHistory, [status]);
+  const live = status === 'running' || status === 'starting';
+  const left = (s: StageState) => (live && size ? remainingFor(s, size, history, now) : null);
+  const totalLeft = live && size ? remainingTotal(stages, size, history, now) : null;
   useEffect(() => {
     if (status !== 'running' && status !== 'starting') return;
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -84,7 +96,7 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
           <strong>{headline}</strong>
           {(status === 'running') && cpu != null && <span className="live">{cpu.toFixed(1)} cores, {bytes(memory)}</span>}
         </div>
-        <time>{duration(elapsed)}</time>
+        <div className="totals"><time>{duration(elapsed)}</time>{totalLeft != null && <span className="left">{leftText(totalLeft)}</span>}</div>
       </div>
       {error && !stages.some(x => x.status === 'failed' || x.status === 'cancelled' || x.status === 'incomplete') && <div className="step-error top">{error}</div>}
       <div className="steps" ref={list} onWheel={() => { userScrolled.current = true; }} onTouchMove={() => { userScrolled.current = true; }}>
@@ -93,6 +105,7 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
           const header = i === 0 || groupOf(stages[i - 1].id) !== group ? group : null;
           const last = i === stages.length - 1 || groupOf(stages[i + 1].id) !== group;
           const live = s.status === 'running' && s.startedAt ? (now - s.startedAt) / 1000 : null;
+          const stepLeft = s.status === 'running' || s.status === 'pending' || s.status === 'waiting' ? left(s) : null;
           const time =
             s.status === 'running' ? duration(live) :
             s.status === 'waiting' ? `waiting for ${(s.waitingFor ?? []).map(stageLabel).join(', ').toLowerCase()}` :
@@ -118,15 +131,18 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
                    s.status === 'skipped' ? <Minus size={12} /> : null}
                 </span>
                 <span className="name">{stageLabel(s.id)}
-                  {s.status === 'running' && s.total ? <small>{s.unit === 'bytes' ? `${bytes(s.done)} of ${bytes(s.total)}` : `${s.done?.toLocaleString()} of ${s.total.toLocaleString()}`}</small> : null}
+                  {s.status === 'running' && s.total ? <small>{formatProgress(s)}</small> : null}
                 </span>
-                <time>{time}</time>
+                <span className="times">
+                  <time>{time}</time>
+                  {stepLeft != null && s.status !== 'waiting' && <small className="eta">{s.status === 'running' ? `~${duration(Math.round(stepLeft))} left` : `~${duration(Math.round(stepLeft))}`}</small>}
+                </span>
                 {onShowLog && (s.status !== 'pending' && s.status !== 'skipped') && (
                   <button className="icon log" title="Show log" aria-expanded={openLog?.stage === s.id} onClick={e => { e.stopPropagation(); toggleLog(s.id); }}>
                     {openLog?.stage === s.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   </button>
                 )}
-                {s.status === 'running' && s.total ? <progress max={s.total} value={s.done ?? 0} /> : null}
+                {s.status === 'running' && (s.total ? <div className="bar"><i style={{width: `${Math.min(100, (100 * (s.done ?? 0)) / s.total)}%`}} /></div> : <div className="bar indeterminate"><i /></div>)}
               </div>
               {openInfo === s.id && <div className="step-info">{STAGES.find(x => x.id === s.id)?.about ?? ''}</div>}
               {failed && error && s.id === stages.find(x => x.status === 'failed' || x.status === 'cancelled' || x.status === 'incomplete')?.id && (

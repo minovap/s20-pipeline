@@ -100,6 +100,9 @@ export const mockApi = {
   readStageLog: async (_: string, stage: string) => `[${stage}] worker started\n[${stage}] 671 frames\n[${stage}] done`,
   deleteRun: async (run: string) => { project = {...project, runs: project.runs.filter(r => r.path !== run)}; },
   deleteExport: async (path: string) => { project = {...project, exports: project.exports.filter(x => x.path !== path)}; },
+  deleteProject: async () => {},
+  tempCopies: async () => ({bytes: 11e9, count: 1, unreferenced_bytes: 0, unreferenced: 0}),
+  cleanTempCopies: async () => 0,
   startJob: async (job: Job) => { timers.forEach(clearTimeout); timers = []; simulateJob(job); },
   cancelJob: async () => { timers.forEach(clearTimeout); timers = []; },
   exportSlices: async (spec: {output: string; sources: {path: string; boxes: Box[]}[]}) => {

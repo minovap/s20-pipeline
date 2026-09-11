@@ -8,8 +8,11 @@ from pathlib import Path
 from .storage import atomic_json
 
 
-def progress(done, total):
-    print(json.dumps({"event": "progress", "done": done, "total": total}), flush=True)
+def progress(done, total, unit=None):
+    row = {"event": "progress", "done": done, "total": total}
+    if unit:
+        row["unit"] = unit
+    print(json.dumps(row), flush=True)
 
 
 def execute(stage, job):
@@ -27,11 +30,11 @@ def execute(stage, job):
     if stage == "decode":
         from .decode import extract
 
-        extract(Path(job["bag"]), dest)
+        extract(Path(job["bag"]), dest, progress)
     elif stage == "pack":
         from .pack import pack
 
-        pack(out / "decode", calibration, dest)
+        pack(out / "decode", calibration, dest, progress)
     elif stage == "tracking":
         call(
             [
@@ -62,6 +65,7 @@ def execute(stage, job):
             out / "tracking/observations",
             dest,
             out / "pose_refinement/poses.txt" if cfg["pose_refinement"] else None,
+            progress,
         )
     elif stage == "geometry":
         command = [
@@ -189,7 +193,7 @@ def execute(stage, job):
                 rgb[start : start + cfg["chunk_points"]] = ex.reference(
                     c[start : start + cfg["chunk_points"]], field, robust=True
                 )
-                progress(min(n, start + cfg["chunk_points"]), n)
+                progress(min(n, start + cfg["chunk_points"]), n, "points")
             rgb.flush()
             atomic_json(dest / "cpu.json", {"backend": "NumPy reference", "points": n})
     elif stage == "export":
@@ -201,6 +205,7 @@ def execute(stage, job):
             out / "blend/colors.bin",
             dest,
             cfg["chunk_points"],
+            progress,
         )
     else:
         raise ValueError(f"Unknown stage: {stage}")

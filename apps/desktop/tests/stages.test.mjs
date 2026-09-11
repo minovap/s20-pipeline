@@ -74,3 +74,23 @@ test('level ground finds a tilted plane and puts it at height 0', async () => {
   // yaw 90: x axis maps to y
   assert(Math.abs(r[3] - 1) < 1e-9 && Math.abs(r[1] + 1) < 1e-9);
 });
+
+test('time remaining comes from the recent rate, then from history', async () => {
+  const {remainingFromRate, predict, recordTiming, remainingTotal, leftText, metricFor} = await import('../src/timing.ts');
+  globalThis.localStorage = {store: {}, getItem(k) { return this.store[k] ?? null; }, setItem(k, v) { this.store[k] = v; }};
+  const now = 100000;
+  const stage = {id: 'tracking', status: 'running', done: 500, total: 1000, startedAt: now - 60000, samples: [[now - 20000, 300], [now - 10000, 400], [now, 500]]};
+  assert.equal(Math.round(remainingFromRate(stage, now)), 50); // 10 units/s, 500 left
+  assert.equal(remainingFromRate({...stage, startedAt: now - 5000}, now), null); // too early
+  const size = {frames: 1000, photos: 50};
+  let history = recordTiming('tracking', size, 40, {});
+  history = recordTiming('tracking', {frames: 2000, photos: 50}, 84, history);
+  assert.equal(Math.round(predict('tracking', {frames: 500, photos: 10}, history)), 21); // median ratio 0.042 s/frame
+  assert.equal(predict('masks', size, history), null);
+  assert.equal(metricFor('candidates', size), 50000);
+  const stages = [{id: 'decode', status: 'complete'}, {id: 'tracking', status: 'pending'}];
+  assert.equal(Math.round(remainingTotal(stages, size, history, now)), 42);
+  assert.equal(leftText(30), 'under a minute left');
+  assert.equal(leftText(750), 'about 13 min left');
+  assert.equal(leftText(4800), 'about 1 h 20 min left');
+});

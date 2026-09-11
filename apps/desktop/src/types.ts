@@ -39,7 +39,13 @@ export function estimatedMatchingSpeedup(photos: number, percent: number) {
 export type Job = Options & {capture: string; output: string; resume: boolean};
 
 export type StageStatus = 'pending' | 'waiting' | 'running' | 'complete' | 'cached' | 'failed' | 'cancelled' | 'incomplete' | 'skipped';
-export type StageState = {id: string; status: StageStatus; done?: number; total?: number; unit?: string; wall_s?: number | null; startedAt?: number; waitingFor?: string[]};
+export type StageState = {
+  id: string; status: StageStatus; done?: number; total?: number; unit?: string; phase?: string; wall_s?: number | null; startedAt?: number; waitingFor?: string[];
+  /** Recent (time ms, done) pairs for the rate estimate. */
+  samples?: [number, number][];
+};
+/** Size of the scan a run processes; drives time predictions from history. */
+export type RunSize = {frames: number; photos: number};
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'starting' | 'unknown';
 export type Run = {
@@ -65,7 +71,7 @@ export type Project = {
 export type Settings = {engine_root: string; engine_ready: boolean; projects_root: string; running: boolean};
 
 export type PipelineEvent = {
-  event: string; stage?: string; done?: number; total?: number; unit?: string; wall_s?: number; waiting_for?: string[]; rss_bytes?: number; cpu_core_equivalents?: number | null;
+  event: string; stage?: string; done?: number; total?: number; unit?: string; phase?: string; wall_s?: number; waiting_for?: string[]; rss_bytes?: number; cpu_core_equivalents?: number | null;
   system_available_memory_bytes?: number; message?: string; run_id: string; time_unix?: number;
 };
 export type ExportEvent = {id: string; name: string; event: 'progress' | 'completed' | 'failed' | 'cancelled'; done?: number; total?: number; file?: string; points?: number; message?: string};

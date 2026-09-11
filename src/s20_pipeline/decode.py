@@ -21,7 +21,7 @@ DT = np.dtype(
 )
 
 
-def extract(source, dest):
+def extract(source, dest, progress=lambda *args: None):
     dest.mkdir(parents=True, exist_ok=False)
     (dest / "scans").mkdir(exist_ok=False)
     store = get_typestore(Stores.ROS1_NOETIC)
@@ -33,7 +33,12 @@ def extract(source, dest):
         conns = [c for c in reader.connections if c.topic in ["/livox/lidar", "/livox/imu"]]
         for c in conns:
             store.register(get_types_from_msg(c.msgdef.data, c.msgtype))
+        total_messages = sum(c.msgcount for c in conns)
+        seen = 0
         for c, bt, raw in reader.messages(connections=conns):
+            seen += 1
+            if seen % 500 == 0 or seen == total_messages:
+                progress(seen, total_messages, "messages")
             if c.topic == "/livox/imu":
                 m = store.deserialize_ros1(raw, c.msgtype)
                 t = m.header.stamp.sec * 10**9 + m.header.stamp.nanosec

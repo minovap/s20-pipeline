@@ -7,7 +7,7 @@ from .ply import map_points, read_ply_info
 from .storage import atomic_json, digest
 
 
-def export(geometry, candidates, colors, destination, chunk=262144):
+def export(geometry, candidates, colors, destination, chunk=262144, progress=lambda *args: None):
     info = read_ply_info(geometry)
     points = map_points(info)
     c = np.memmap(candidates, dtype="<f4", mode="r", shape=(info.point_count, 4, 8))
@@ -24,6 +24,7 @@ def export(geometry, candidates, colors, destination, chunk=262144):
         (destination / "source-indices.u64").open("xb") as index_file,
     ):
         for start in range(0, info.point_count, chunk):
+            progress(min(info.point_count, start + chunk), info.point_count, "points")
             ids = np.flatnonzero(c[start : start + chunk, 0, 7] > 0) + start
             if not len(ids):
                 continue

@@ -25,6 +25,9 @@ const real = {
   readStageLog: (run: string, stage: string) => invoke<string>('read_stage_log', {run, stage}),
   deleteRun: (run: string) => invoke<void>('delete_run', {run}),
   deleteExport: (path: string) => invoke<void>('delete_export', {path}),
+  deleteProject: (path: string) => invoke<void>('delete_project', {path}),
+  tempCopies: () => invoke<{bytes: number; count: number; unreferenced_bytes: number; unreferenced: number}>('temp_copies'),
+  cleanTempCopies: () => invoke<number>('clean_temp_copies'),
 
   startJob: (options: Job) => invoke<void>('start_job', {options}),
   cancelJob: () => invoke<void>('cancel_job'),

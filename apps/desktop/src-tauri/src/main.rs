@@ -191,13 +191,13 @@ fn project_file(state: &Engine, project: &str) -> Result<(PathBuf, PathBuf), Str
     let root = projects_root(state)?;
     let folder = PathBuf::from(project)
         .canonicalize()
-        .map_err(|_| "Project folder not found".to_string())?;
+        .map_err(|_| "Project folder not found. It was moved or deleted outside the app.".to_string())?;
     if !folder.starts_with(&root) || folder == root {
         return Err("Project is outside the projects folder".into());
     }
     let file = folder.join("project.json");
     if !file.is_file() {
-        return Err("Not a project folder".into());
+        return Err("Not a project folder: project.json is missing.".into());
     }
     Ok((folder, file))
 }
@@ -259,7 +259,7 @@ fn read_run(folder: &Path) -> Option<Value> {
             "wall_s": receipt.as_ref().and_then(|r| r["wall_s"].as_f64()),
         }));
     }
-    let status = state["status"].as_str().unwrap_or("unknown");
+    let status = state["status"].as_str().unwrap_or(if folder.join("state.json").is_file() { "unknown" } else { "incomplete" });
     let color = job["options"]["color"].as_bool().unwrap_or(true);
     let result = if color {
         folder.join("export/colorized.las")
@@ -336,7 +336,20 @@ fn read_exports(folder: &Path) -> Vec<Value> {
     files.sort_by(|a, b| b["modified"].as_f64().partial_cmp(&a["modified"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
     files
 }
+/// Copy records left next to runs that no longer exist.
+fn sweep_orphan_sidecars(folder: &Path) {
+    if let Ok(entries) = fs::read_dir(folder.join("runs")) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() && path.to_string_lossy().ends_with(".copy.json") {
+                let run = path.with_extension("").with_extension("");
+                if !run.is_dir() { let _ = fs::remove_file(&path); }
+            }
+        }
+    }
+}
 fn full_project(folder: &Path) -> Result<Value, String> {
+    sweep_orphan_sidecars(folder);
     let mut project = read_json(&folder.join("project.json")).ok_or("Project file unreadable")?;
     project["path"] = json!(folder);
     project["runs"] = json!(read_runs(folder));
@@ -521,6 +534,87 @@ fn delete_run_path(root: &Path, run: &str) -> Result<(), String> {
         Err(e) => Err(format!("Could not delete {}: {e}", folder.display())),
     }
 }
+/// Temporary copy paths referenced by one project's runs (folders and sidecars).
+fn project_temp_copies(project: &Path, out: &mut std::collections::HashSet<PathBuf>) {
+    if let Ok(runs) = fs::read_dir(project.join("runs")) {
+        for entry in runs.filter_map(|e| e.ok()).map(|e| e.path()) {
+            let record = if entry.is_dir() { entry.join("copy.json") } else { entry.clone() };
+            if let Some(temp) = read_json(&record).and_then(|c| c["temp"].as_str().map(PathBuf::from)) {
+                out.insert(temp);
+            }
+        }
+    }
+}
+/// Every temporary copy path referenced by any run of any project.
+fn referenced_temp_copies(root: &Path) -> std::collections::HashSet<PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    if let Ok(projects) = fs::read_dir(root) {
+        for project in projects.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
+            project_temp_copies(&project, &mut out);
+        }
+    }
+    out
+}
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p.is_dir() { total += dir_size(&p); } else if let Ok(m) = entry.metadata() { total += m.len(); }
+        }
+    }
+    total
+}
+fn temp_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().download_dir().map_err(|e| e.to_string())?.join("S20 temp"))
+}
+#[tauri::command]
+fn temp_copies(app: tauri::AppHandle, state: State<Engine>) -> Result<Value, String> {
+    let referenced = referenced_temp_copies(&projects_root(&state)?);
+    let (mut bytes, mut count, mut unreferenced_bytes, mut unreferenced) = (0u64, 0u64, 0u64, 0u64);
+    if let Ok(entries) = fs::read_dir(temp_root(&app)?) {
+        for dir in entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
+            let size = dir_size(&dir);
+            bytes += size;
+            count += 1;
+            if !referenced.contains(&dir) { unreferenced_bytes += size; unreferenced += 1; }
+        }
+    }
+    Ok(json!({"bytes": bytes, "count": count, "unreferenced_bytes": unreferenced_bytes, "unreferenced": unreferenced}))
+}
+/// Remove temporary copies that no run of any project references. Returns the number removed.
+#[tauri::command]
+fn clean_temp_copies(app: tauri::AppHandle, state: State<Engine>) -> Result<u64, String> {
+    if state.running.load(Ordering::SeqCst) {
+        return Err("Wait for the active run to finish first".into());
+    }
+    let referenced = referenced_temp_copies(&projects_root(&state)?);
+    let mut removed = 0;
+    if let Ok(entries) = fs::read_dir(temp_root(&app)?) {
+        for dir in entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
+            if !referenced.contains(&dir) && fs::remove_dir_all(&dir).is_ok() { removed += 1; }
+        }
+    }
+    Ok(removed)
+}
+/// Move a project folder to the Trash; its temporary copies go too unless another project uses them.
+#[tauri::command]
+fn delete_project(path: String, state: State<Engine>) -> Result<(), String> {
+    if state.running.load(Ordering::SeqCst) {
+        return Err("Wait for the active run to finish first".into());
+    }
+    let (folder, _) = project_file(&state, &path)?;
+    let root = projects_root(&state)?;
+    let mut mine = std::collections::HashSet::new();
+    project_temp_copies(&folder, &mut mine);
+    trash::delete(&folder).map_err(|e| format!("Could not move the project to the Trash: {e}"))?;
+    let still_used = referenced_temp_copies(&root);
+    for temp in mine {
+        if !still_used.contains(&temp) { let _ = fs::remove_dir_all(&temp); }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn delete_export(path: String, state: State<Engine>) -> Result<(), String> {
     let root = projects_root(&state)?;
@@ -1059,6 +1153,9 @@ fn main() {
             read_stage_log,
             delete_run,
             delete_export,
+            delete_project,
+            temp_copies,
+            clean_temp_copies,
             start_job,
             cancel_job,
             export_slices,

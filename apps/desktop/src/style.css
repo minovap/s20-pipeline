@@ -164,7 +164,17 @@ input[type=checkbox], input[type=radio] { accent-color: var(--accent); width: 15
 .group time { color: var(--faint); font-size: 12px; }
 .group.done time { color: var(--muted); }
 .group span::after { content: ""; display: inline-block; vertical-align: middle; width: 40px; height: 1px; background: var(--line); margin-left: 12px; }
-.step { position: relative; display: grid; grid-template-columns: 20px 1fr auto 24px; align-items: center; gap: 12px; padding: 7px 12px 7px 16px; color: var(--muted); }
+.step { position: relative; display: grid; grid-template-columns: 20px 1fr auto 24px; align-items: center; gap: 12px; padding: 7px 12px 9px 16px; color: var(--muted); }
+.step .times { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.step .times .eta { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.step.running .times .eta { color: var(--muted); }
+.step .bar { position: absolute; left: 48px; right: 48px; bottom: 3px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.step .bar i { display: block; height: 100%; background: var(--amber); border-radius: 2px; transition: width 0.6s linear; }
+.step .bar.indeterminate i { width: 30%; animation: sheen 1.6s ease-in-out infinite; opacity: 0.7; }
+@keyframes sheen { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .step .bar.indeterminate i { animation: none; width: 100%; opacity: 0.35; } }
+.pipeline-head .totals { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.pipeline-head .left { color: var(--muted); font-size: 12px; }
 .step .mark { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid var(--line); color: transparent; position: relative; z-index: 1; background: var(--panel); }
 .step::before { content: ""; position: absolute; left: 25px; top: -8px; bottom: -8px; width: 1.5px; background: var(--line); }
 .step.first::before { top: 50%; }
@@ -188,9 +198,6 @@ input[type=checkbox], input[type=radio] { accent-color: var(--accent); width: 15
 .step.waiting { color: var(--muted); }
 .step.waiting .mark { border-style: dashed; border-color: var(--amber); opacity: 0.7; }
 .step.waiting time { color: var(--amber); opacity: 0.8; font-size: 12px; }
-.step progress { position: absolute; left: 48px; right: 48px; bottom: 2px; height: 2px; appearance: none; -webkit-appearance: none; border: 0; background: var(--line); }
-.step progress::-webkit-progress-bar { background: var(--line); }
-.step progress::-webkit-progress-value { background: var(--amber); }
 .step { cursor: pointer; }
 .step:hover { background: var(--raised); }
 .step.running:hover { background: linear-gradient(90deg, #2f3026, var(--raised)); }

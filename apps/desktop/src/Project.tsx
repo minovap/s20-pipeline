@@ -35,7 +35,12 @@ export function ProjectScreen(props: {
       setProject(p);
       const checks = await Promise.all(p.inputs.map(async i => [i.path, await api.inputAvailable(i.path)] as const));
       setAvailable(Object.fromEntries(checks));
-    } catch (e) { onError(errorText(e)); props.onBack(); }
+    } catch (e) {
+      // A project deleted or moved outside the app: go back to the list quietly.
+      const text = errorText(e);
+      if (/not found|Not a project/i.test(text)) { localStorage.removeItem('lastProject'); props.onBack(); return; }
+      onError(text); props.onBack();
+    }
   }, [path, onError]);
   useEffect(() => { void load(); }, [load, reloadKey]);
 
@@ -105,6 +110,13 @@ export function ProjectScreen(props: {
     try { setProject(await api.writeProject(project.path, {clouds: [...project.clouds, {path: p, name: basename(p).replace(/\.(las|ply)$/i, ''), added: Date.now() / 1000}]})); }
     catch (e) { onError(errorText(e)); }
   }
+  function deleteProject() {
+    if (!project) return;
+    const runs = project.runs.length, exports = project.exports.length;
+    setDialog(<ConfirmDialog title="Delete project" confirm="Move to Trash" danger onCancel={() => setDialog(null)}
+      body={<>Move <b>{project.name}</b> to the Trash? It holds {runs === 1 ? '1 run' : `${runs} runs`} and {exports === 1 ? '1 export' : `${exports} exports`}. Temporary scan copies that no other project uses are removed. Scan folders are not touched.</>}
+      onConfirm={async () => { setDialog(null); try { await api.deleteProject(project.path); localStorage.removeItem('lastProject'); props.onBack(); } catch (e) { onError(errorText(e)); } }} />);
+  }
   function rename() {
     if (!project) return;
     setDialog(<NameDialog title="Rename project" defaultValue={project.name} onCancel={() => setDialog(null)}
@@ -123,7 +135,7 @@ export function ProjectScreen(props: {
       <header className="bar">
         <div className="row">
           <button className="icon" onClick={props.onBack} aria-label="All projects" title="All projects"><ChevronLeft size={18} /></button>
-          <h1 onContextMenu={e => openMenu(e, [{label: 'Rename', onClick: rename}, {label: 'Show in Finder', onClick: () => api.reveal(project.path)}])} title="Right-click to rename">{project.name}</h1>
+          <h1 onContextMenu={e => openMenu(e, [{label: 'Rename', onClick: rename}, {label: 'Show in Finder', onClick: () => api.reveal(project.path)}, {separator: true, label: ''}, {label: 'Delete project', danger: true, disabled: busy, onClick: deleteProject}])} title="Right-click for options">{project.name}</h1>
         </div>
         <div className="row">
           <button onClick={() => props.onOpenViewer()} disabled={!runs.some(r => r.result) && !project.exports.length && !project.clouds.length}>Open viewer</button>
@@ -342,6 +354,7 @@ function RunDetail({run, live, project, busy, onCancel, onResume, onOpenViewer, 
         </div>
       )}
       <Pipeline stages={stages} status={status} startedAt={started} finishedAt={finished} error={explainError(rawError, run.options.memory_gb)} cpu={live?.cpu} memory={live?.memory}
+        size={live?.size ?? {frames: input?.capture.lidar_frames ?? 0, photos: input?.capture.photos ?? 0}}
         onShowLog={stage => api.readStageLog(run.path, stage)} />
     </div>
   );

@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -131,6 +132,81 @@ DEPENDENCIES = {
 GEOMETRY_LANE = {"decode", "pack", "tracking", "pose_refinement", "registered", "geometry"}
 
 
+NATIVE_PROGRESS = {
+    # Text lines the native workers print; (regex, unit). Groups: done, total.
+    "tracking": (re.compile(r"^(\d+)/(\d+) frames;"), "frames"),
+    "pose_refinement": (re.compile(r"^refined (\d+)/(\d+) scans"), "frames"),
+}
+
+
+class GeometryProgress:
+    """Two phases from geometry's log: frames loaded, then subfile points filtered."""
+
+    def __init__(self, frames_total):
+        self.frames_total = frames_total
+        self.points_total = 0
+        self.points_done = 0
+        self.pending = 0
+
+    def parse(self, line):
+        m = re.match(r"^Loaded (\d+) frames", line)
+        if m and self.frames_total:
+            return {
+                "done": int(m.group(1)),
+                "total": self.frames_total,
+                "unit": "frames",
+                "phase": "loading",
+            }
+        m = re.match(r"^Ray subfiles total=(\d+) points=(\d+)", line)
+        if m:
+            self.points_total = int(m.group(2))
+            return {"done": 0, "total": self.points_total, "unit": "points", "phase": "filtering"}
+        m = re.match(r"^Ray subfile \[[^\]]*\] points=(\d+)", line)
+        if m:
+            self.pending = int(m.group(1))
+            if "skipped" in line:
+                self.points_done += self.pending
+                self.pending = 0
+                return self.filtering()
+            return None
+        if re.match(r"^Ray subfile \[[^\]]*\] wrote=", line):
+            self.points_done += self.pending
+            self.pending = 0
+            return self.filtering()
+        return None
+
+    def filtering(self):
+        if not self.points_total:
+            return None
+        return {
+            "done": min(self.points_done, self.points_total),
+            "total": self.points_total,
+            "unit": "points",
+            "phase": "filtering",
+        }
+
+
+def stage_progress_parser(stage, out):
+    if stage == "geometry":
+        frames = 0
+        try:
+            frames = int(
+                json.loads((out / "registered/metadata.json").read_text()).get("frames", 0)
+            )
+        except (OSError, ValueError):
+            pass
+        return GeometryProgress(frames).parse
+    if stage in NATIVE_PROGRESS:
+        pattern, unit = NATIVE_PROGRESS[stage]
+
+        def parse(line):
+            m = pattern.match(line)
+            return {"done": int(m.group(1)), "total": int(m.group(2)), "unit": unit} if m else None
+
+        return parse
+    return lambda line: None
+
+
 def lane(stage):
     return "geometry" if stage in GEOMETRY_LANE else "color"
 
@@ -239,6 +315,8 @@ def _run(job, resume=False):
             "cpu_seconds": 0.0,
             "last_sample": None,
             "cursor": 0,
+            "parse": stage_progress_parser(stage, out),
+            "last_progress": None,
         }
 
     def finish(stage, item):
@@ -311,18 +389,32 @@ def _run(job, resume=False):
                         pass
                     with item["log_path"].open() as reader:
                         reader.seek(item["cursor"])
+                        latest = None
                         for line in reader:
-                            try:
-                                value = json.loads(line)
-                                if value.get("event") == "progress":
-                                    emit(
-                                        "progress",
-                                        stage=stage,
-                                        done=value["done"],
-                                        total=value["total"],
-                                    )
-                            except (ValueError, AttributeError):
-                                pass
+                            value = None
+                            if line.startswith("{"):
+                                try:
+                                    value = json.loads(line)
+                                except ValueError:
+                                    value = None
+                                if not isinstance(value, dict) or value.get("event") != "progress":
+                                    value = None
+                            else:
+                                value = item["parse"](line)
+                            if value:
+                                latest = value
+                        # One event per poll keeps the stream small even when a
+                        # worker logs progress very often.
+                        if latest and latest != item["last_progress"]:
+                            item["last_progress"] = latest
+                            emit(
+                                "progress",
+                                stage=stage,
+                                done=latest["done"],
+                                total=latest["total"],
+                                unit=latest.get("unit"),
+                                phase=latest.get("phase"),
+                            )
                         item["cursor"] = reader.tell()
                     if child.poll() is not None:
                         del running[stage]

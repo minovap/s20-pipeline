@@ -8,13 +8,14 @@ import {Projects} from './Projects';
 import {ProjectScreen} from './Project';
 import {Viewer} from './viewer/Viewer';
 import {ErrorBar, Modal} from './ui';
-import {runFolderName} from './format';
+import {bytes, runFolderName} from './format';
 import {stagesFor} from './types';
-import type {Input, Job, Options, PipelineEvent, Project, Run, RunStatus, Settings, StageState} from './types';
+import type {Input, Job, Options, PipelineEvent, Project, Run, RunSize, RunStatus, Settings, StageState} from './types';
+import {recordTiming} from './timing';
 import './style.css';
 
 export type LiveRun = {
-  project: string; job: Job; status: RunStatus; order: string[]; stages: Record<string, StageState>;
+  project: string; job: Job; size: RunSize; status: RunStatus; order: string[]; stages: Record<string, StageState>;
   startedAt: number; finishedAt: number | null; error: string | null; cpu: number | null; memory: number | null; logs: string[];
 };
 type Screen = {kind: 'projects'} | {kind: 'project'; path: string} | {kind: 'viewer'; path: string; focus?: string};
@@ -68,10 +69,19 @@ function App() {
         update(r => ({...r, stages: {...r.stages, [id]: {id, status: 'waiting', waitingFor: e.waiting_for ?? []}}}));
       } else if (e.event === 'progress' && e.stage) {
         const id = e.stage;
-        update(r => ({...r, stages: {...r.stages, [id]: {...r.stages[id], id, status: 'running', done: e.done, total: e.total, unit: e.unit}}}));
+        update(r => {
+          const previous = r.stages[id];
+          // A new phase restarts the rate window.
+          const samples = (previous?.phase === e.phase ? previous?.samples ?? [] : []).concat([[t, e.done ?? 0]]).slice(-40);
+          return {...r, stages: {...r.stages, [id]: {...previous, id, status: 'running', done: e.done, total: e.total, unit: e.unit, phase: e.phase, samples}}};
+        });
       } else if (e.event === 'stage_completed' && e.stage) {
         const id = e.stage;
-        update(r => ({...r, stages: {...r.stages, [id]: {id, status: 'complete', wall_s: e.wall_s ?? (r.stages[id]?.startedAt ? (t - r.stages[id].startedAt!) / 1000 : null)}}}));
+        update(r => {
+          const wall = e.wall_s ?? (r.stages[id]?.startedAt ? (t - r.stages[id].startedAt!) / 1000 : null);
+          if (wall != null) recordTiming(id, r.size, wall);
+          return {...r, stages: {...r.stages, [id]: {id, status: 'complete', wall_s: wall}}};
+        });
       } else if (e.event === 'resources') {
         update(r => ({...r, cpu: e.cpu_core_equivalents ?? null, memory: e.rss_bytes ?? null}));
       } else if (e.event === 'failed' || e.event === 'cancelled') {
@@ -99,20 +109,21 @@ function App() {
     return () => { disposed = true; offs.forEach(off => off()); };
   }, []);
 
+  const sizeOf = (input?: Input): RunSize => ({frames: input?.capture.lidar_frames ?? 0, photos: input?.capture.photos ?? 0});
   async function startRun(project: Project, input: Input, options: Options) {
     const job: Job = {...options, copy: !!input.copy, capture: input.path, output: `${project.path}/runs/${runFolderName()}`, resume: false};
-    await launch(project.path, job);
+    await launch(project.path, job, sizeOf(input));
   }
   async function resumeRun(project: Project, run: Run, overrides: Partial<Options> = {}) {
     const job: Job = {...run.options, ...overrides, copy: !!run.options.copy, capture: run.capture, output: run.path, resume: true};
-    await launch(project.path, job, run);
+    await launch(project.path, job, sizeOf(project.inputs.find(i => i.path === run.capture)), run);
   }
-  async function launch(projectPath: string, job: Job, previous?: Run) {
+  async function launch(projectPath: string, job: Job, size: RunSize, previous?: Run) {
     const forecast = stagesFor(job).map(s => s.id);
     const stages: Record<string, StageState> = {};
     for (const id of forecast) stages[id] = {id, status: 'pending'};
     if (previous) for (const s of previous.stages) if (s.status === 'complete') stages[s.id] = {id: s.id, status: 'pending', wall_s: s.wall_s};
-    setLive({project: projectPath, job, status: 'starting', order: [], stages, startedAt: Date.now(), finishedAt: null, error: null, cpu: null, memory: null, logs: []});
+    setLive({project: projectPath, job, size, status: 'starting', order: [], stages, startedAt: Date.now(), finishedAt: null, error: null, cpu: null, memory: null, logs: []});
     setError('');
     try { await api.startJob(job); }
     catch (e) { setLive(r => (r ? {...r, status: 'failed', finishedAt: Date.now(), error: errorText(e)} : r)); }
@@ -155,6 +166,11 @@ function App() {
 }
 
 function SettingsDialog({settings, busy, onChange, onClose, onError}: {settings: Settings; busy: boolean; onChange: () => void; onClose: () => void; onError: (m: string) => void}) {
+  const [temp, setTemp] = useState<{bytes: number; count: number; unreferenced_bytes: number; unreferenced: number} | null>(null);
+  useEffect(() => { api.tempCopies().then(setTemp).catch(() => setTemp(null)); }, []);
+  async function clean() {
+    try { await api.cleanTempCopies(); setTemp(await api.tempCopies()); } catch (e) { onError(errorText(e)); }
+  }
   async function chooseEngine() {
     const p = await pickFolder('Choose the s20-pipeline folder');
     if (!p) return;
@@ -177,6 +193,11 @@ function SettingsDialog({settings, busy, onChange, onClose, onError}: {settings:
         <code title={settings.engine_root}>{settings.engine_root}</code>
         <p className="note">{settings.engine_ready ? 'Python environment and native binaries found.' : 'Not usable yet: the folder needs a built .venv and build/s20_geometry. See the pipeline README.'}</p>
         <div className="row"><button onClick={chooseEngine} disabled={busy}>Change</button></div>
+      </div>
+      <div className="setting">
+        <span>Temporary scan copies</span>
+        <p className="note">{temp ? (temp.count ? `${temp.count === 1 ? '1 copy' : `${temp.count} copies`}, ${bytes(temp.bytes)} in Downloads. ${temp.unreferenced ? `${bytes(temp.unreferenced_bytes)} belongs to runs that no longer exist.` : 'All belong to existing runs.'}` : 'None.') : 'Reading…'}</p>
+        <div className="row"><button onClick={clean} disabled={!temp?.unreferenced || busy}>Remove unused copies</button></div>
       </div>
     </Modal>
   );

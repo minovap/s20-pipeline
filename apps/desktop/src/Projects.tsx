@@ -3,7 +3,7 @@ import React, {useCallback, useEffect, useState} from 'react';
 import {Plus, Settings2} from 'lucide-react';
 import {api, errorText} from './api';
 import {when} from './format';
-import {NameDialog, Spinner, useContextMenu} from './ui';
+import {ConfirmDialog, NameDialog, Spinner, useContextMenu} from './ui';
 import type {LiveRun} from './main';
 import type {ProjectSummary, Run, Settings} from './types';
 
@@ -15,6 +15,7 @@ export function Projects({settings, live, onOpen, onSettings, onError}:
   {settings: Settings; live: LiveRun | null; onOpen: (path: string) => void; onSettings: () => void; onError: (m: string) => void}) {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [creating, setCreating] = useState(false);
+  const [dialog, setDialog] = useState<React.ReactNode>(null);
   const {openMenu, menu} = useContextMenu();
 
   const load = useCallback(async () => {
@@ -54,7 +55,13 @@ export function Projects({settings, live, onOpen, onSettings, onError}:
               const last = p.last_run;
               return (
                 <li key={p.path}>
-                  <button className="rowbutton" onClick={() => onOpen(p.path)} onContextMenu={e => openMenu(e, [{label: 'Show in Finder', onClick: () => api.reveal(p.path)}])}>
+                  <button className="rowbutton" onClick={() => onOpen(p.path)} onContextMenu={e => openMenu(e, [
+                    {label: 'Show in Finder', onClick: () => api.reveal(p.path)},
+                    {separator: true, label: ''},
+                    {label: 'Delete project', danger: true, disabled: isLive, onClick: () => setDialog(<ConfirmDialog title="Delete project" confirm="Move to Trash" danger onCancel={() => setDialog(null)}
+                      body={<>Move <b>{p.name}</b> to the Trash? It holds {p.run_count === 1 ? '1 run' : `${p.run_count} runs`}. Temporary scan copies that no other project uses are removed. Scan folders are not touched.</>}
+                      onConfirm={async () => { setDialog(null); try { await api.deleteProject(p.path); await load(); } catch (e) { onError(errorText(e)); } }} />)},
+                  ])}>
                     <strong>{p.name}</strong>
                     <span className="muted">{p.input_count === 1 ? '1 scan' : `${p.input_count} scans`}, {p.run_count === 1 ? '1 run' : `${p.run_count} runs`}</span>
                     <span className={'status ' + (isLive ? 'running' : last?.status ?? '')}>
@@ -68,6 +75,7 @@ export function Projects({settings, live, onOpen, onSettings, onError}:
          )}
       </main>
       {creating && <NameDialog title="New project" defaultValue="Garden" confirm="Create" onSubmit={create} onCancel={() => setCreating(false)} />}
+      {dialog}
       {menu}
     </div>
   );
