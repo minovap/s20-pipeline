@@ -4,7 +4,7 @@ A standalone macOS pipeline for raw SHARE S20 captures: LiDAR/IMU decoding → n
 
 The default color algorithm is the accepted visibility/consensus implementation. No Windows executable, Studio masks, Studio colors or Studio poses are needed to run it. The Metal geometry implementation was informed by recovered Studio kernel behavior; its provenance is documented in [PROVENANCE.md](docs/PROVENANCE.md).
 
-**Status: tested engineering release candidate, not a broadly certified production release.** This repository removes the experiment-folder dependencies and fixed photo count. See [VALIDATION.md](docs/VALIDATION.md) for exactly what passed, and the remaining release gates. Large scans are not yet fully out of core. The garden recording's camera convention is not validated by the indoor test.
+**Status: tested engineering release candidate, not a broadly certified production release.** This repository removes the experiment-folder dependencies and fixed photo count. See [VALIDATION.md](docs/VALIDATION.md) for exactly what passed, and the remaining release gates. Tracking streams frames and geometry bounds its GPU batches, but geometry still holds the registered cloud in memory (about 24 bytes per point). The garden recording's camera convention is not validated by the indoor test.
 
 ## Install and build
 

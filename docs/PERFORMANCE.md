@@ -38,3 +38,18 @@ Each run saves immutable input identities, configuration and native/source ident
 CPU core equivalents = CPU seconds / wall seconds. Per-process RSS is not unified GPU usage. Metal allocation overlaps mapped/unified memory, and MPS synchronized forward wall time is not hardware GPU command duration. No tool in this package currently reports system GPU occupancy. Missing values are null.
 
 Large-scan release acceptance must cover at least 5× and 20× captures, image-pair rejection accuracy, memory pressure, cancellation and restart. Estimate intervals should widen when selected points/photos, memory pressure or computer hardware differ from the measured reference. The CLI's current range is an explicit heuristic, not a statistical interval.
+
+
+## Large-scan measurements, 11 September 2026
+
+An 18-minute garden capture (10,972 frames, 160 M registered points, 1,094 photos) on the M4 Max with 64 GB. Peak RSS sampled every 20 s from the process; "before" is the release before the changes below, "after" is the same commit as this note. Outputs are identical on both scans: same trajectory to the millimetre, same kept and noise point counts.
+
+| Stage | Before | After | What changed |
+|---|---|---|---|
+| Track motion and deskew | 411 s, 32 GB | 340 s, 17 GB | Frames stream from the packed file instead of being preloaded (4.4 GB); the whole-scan voxel map and far-observation file, which no later stage read, are no longer built; observation records are written on a background thread. The remaining memory is the KISS-ICP local map. |
+| Register scan frames | 90 s on one core | frames convert in parallel | Per-frame PCD conversion in a process pool. |
+| Filter geometry | failed past 32 GB; a run with no limit took 3,643 s at 56 GB | 451 s, 17 GB | The loader reserved the exact size before every frame and so reallocated and copied the whole cloud 10,950 times; it now reserves once from the PCD headers. Every kernel launch drains an autorelease pool, so a subfile's GPU buffers are freed when it finishes instead of at exit. Rays stream to the GPU in 16 M point batches, and subfiles are extracted one at a time with GCD instead of all at once. |
+
+The small indoor test scan (671 frames, 12.5 M points) is unchanged in time and slightly lower in memory; the fixes only matter when the cloud is large.
+
+Not changed: registration itself, the per-block density kd-tree in geometry (43 s here, single threaded), and the 50 m subfile size.
