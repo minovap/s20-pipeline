@@ -151,8 +151,34 @@ export class CloudRenderer {
     return [[lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]];
   }
 
-  /** Orbit, pan and zoom on or off (off while drawing a slice). */
-  setInteractive(on: boolean) { this.controls.enabled = on; }
+  /** Slice mode: left drag is for drawing, right drag still pans and the wheel zooms. */
+  private sliceMode = false;
+  setSliceMode(on: boolean) {
+    this.sliceMode = on;
+    this.applySliceMode();
+  }
+  private applySliceMode() {
+    this.controls.mouseButtons.LEFT = this.sliceMode ? (-1 as unknown as THREE.MOUSE) : THREE.MOUSE.ROTATE;
+  }
+
+  /** Direction the camera looks along, unit vector in scene/world axes. */
+  viewDirection(): THREE.Vector3 {
+    const d = new THREE.Vector3();
+    this.camera.getWorldDirection(d);
+    return d;
+  }
+  /** Which world axes run horizontally and vertically across the screen in the current axis view. */
+  screenAxes(): {h: 0 | 1 | 2; v: 0 | 1 | 2} {
+    if (this.mode === 'top') return {h: 0, v: 1};
+    if (this.mode === 'front') return {h: 0, v: 2};
+    return {h: 1, v: 2};
+  }
+  /** CSS pixel position of a scene-space point. */
+  project(point: THREE.Vector3): {x: number; y: number} {
+    const {w, h} = this.size();
+    const p = point.clone().project(this.camera);
+    return {x: (p.x + 1) / 2 * w, y: (1 - p.y) / 2 * h};
+  }
 
   /** Bounds of the currently shown points (union of shown cloud boxes), scene coordinates. */
   shownBounds(): THREE.Box3 | null {
@@ -195,6 +221,7 @@ export class CloudRenderer {
     this.controls.dispose();
     this.controls = this.makeControls(this.camera);
     this.controls.enabled = wasEnabled;
+    this.applySliceMode();
     this.controls.target.copy(previousTarget);
     if (mode === 'persp') {
       this.controls.enableRotate = true;

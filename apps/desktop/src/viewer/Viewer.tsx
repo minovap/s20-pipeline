@@ -1,7 +1,8 @@
 // Full-window point cloud viewer with axis-locked views, box slices and export.
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {ChevronLeft, Columns2, Crop, FlipHorizontal2, Maximize, PanelRightClose, PanelRightOpen} from 'lucide-react';
-import {IDENTITY, isIdentity, levelGround, transformFor} from './orient';
+import {ChevronLeft, Columns2, Compass, Crop, FlipHorizontal2, Maximize, PanelRightClose, PanelRightOpen} from 'lucide-react';
+import * as THREE from 'three';
+import {IDENTITY, isIdentity, levelGround, rotateAboutAxis, transformFor} from './orient';
 import {api, errorText, listen} from '../api';
 import {basename, bytes, count, when} from '../format';
 import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, useContextMenu} from '../ui';
@@ -10,7 +11,10 @@ import {CloudRenderer, DEPTH_AXIS, type ViewMode} from './render';
 import {children, countMask, descendants, effectiveBox, intersect, newId, nextSliceName, normalize, unionMask} from './slices';
 
 type Source = {path: string; name: string; detail: string; kind: 'result' | 'export' | 'import'};
-type Rect = {x0: number; y0: number; x1: number; y1: number};
+type V3 = [number, number, number];
+/** A slice being drawn: two opposite corners in world coordinates on the view plane. */
+type Draft = {p1: V3; p2: V3};
+type Handle = 'tl' | 'tr' | 'bl' | 'br' | 'l' | 'r' | 't' | 'b' | 'move';
 
 export function Viewer({path, focus, onBack, onError}: {path: string; focus?: string; onBack: () => void; onError: (m: string) => void}) {
   const [project, setProject] = useState<Project | null>(null);
@@ -26,10 +30,15 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const [budget, setBudget] = useState(() => +(localStorage.getItem('budget') ?? 1000000));
   const [panel, setPanel] = useState(true);
   const [scale, setScale] = useState<number | null>(null);
-  const [rect, setRect] = useState<Rect | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  /** Calibration mode edits one cloud's orientation locally until Save. */
+  const [calibrating, setCalibrating] = useState<{source: string; before: Orientation; current: Orientation; checkedBefore: Set<string>; modeBefore: ViewMode} | null>(null);
+  const drag = useRef<{handle: Handle; start: Draft; origin: V3} | null>(null);
+  const [viewTick, setViewTick] = useState(0);
   const [dialog, setDialog] = useState<React.ReactNode>(null);
   const [exporting, setExporting] = useState<{name: string; done: number; total: number} | null>(null);
-  const [queue, setQueue] = useState<{name: string; sources: {path: string; boxes: Box[]}[]}[]>([]);
+  type ExportJob = {name: string; sources: {path: string; boxes: Box[]; transform?: ReturnType<typeof transformFor>}[]};
+  const [queue, setQueue] = useState<ExportJob[]>([]);
   const [toast, setToast] = useState('');
   const {openMenu, menu} = useContextMenu();
 
@@ -51,7 +60,10 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     return list;
   }, [project]);
   const slices = project?.slices ?? [];
-  const orientations = project?.orientations ?? {};
+  const orientations = useMemo<Record<string, Orientation>>(() => {
+    const stored = project?.orientations ?? {};
+    return calibrating ? {...stored, [calibrating.source]: calibrating.current} : stored;
+  }, [project, calibrating]);
 
   const initialised = useRef(false);
   useEffect(() => {
@@ -60,8 +72,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     const first = (focus && sources.find(s => s.path === focus)?.path) ?? sources[0].path;
     const params = new URLSearchParams(location.search);
     const slice = params.get('slice') ? project.slices.find(x => x.name === params.get('slice')) : null;
-    setChecked(new Set([slice ? slice.id : first]));
+    setChecked(new Set(params.get('check') === 'all' ? sources.map(x => x.path) : [slice ? slice.id : first]));
     setSelected(slice ? slice.id : first);
+    if (params.get('calibrate')) setTimeout(() => startCalibration(first), 800);
   }, [project, sources, focus]);
 
   // ---- renderer lifecycle
@@ -70,7 +83,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     let r: CloudRenderer;
     try { r = new CloudRenderer(canvas.current, host.current); }
     catch (e) { onError(`The point cloud view could not start: ${errorText(e)}`); return; }
-    r.onChange = () => setScale(r.metresPerPixel());
+    r.onChange = () => { setScale(r.metresPerPixel()); setViewTick(t => t + 1); };
     renderer.current = r;
     return () => { r.dispose(); renderer.current = null; };
   }, []);
@@ -108,7 +121,8 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     r.setClouds(clouds);
     for (const path of clouds.keys()) r.setOrientation(path, orientations[path] ?? IDENTITY);
   }, [clouds, orientations]);
-  useEffect(() => { renderer.current?.setInteractive(!(slicing && mode !== 'persp')); }, [slicing, mode]);
+  useEffect(() => { renderer.current?.setSliceMode(slicing && mode !== 'persp'); }, [slicing, mode]);
+  useEffect(() => { if (!slicing) setDraft(null); }, [slicing]);
 
   // ---- visibility masks: a checked cloud shows everything; otherwise the union of its checked slices
   useEffect(() => {
@@ -146,11 +160,12 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
 
   // ---- slicing
   const sliceTarget = useMemo<{source: string; parent: Slice | null} | null>(() => {
+    if (calibrating) return {source: calibrating.source, parent: null};
     if (selectedSlice) return {source: selectedSlice.source, parent: selectedSlice};
     if (selected && sources.some(s => s.path === selected)) return {source: selected, parent: null};
     const firstChecked = [...checked].find(id => sources.some(s => s.path === id));
     return firstChecked ? {source: firstChecked, parent: null} : null;
-  }, [selectedSlice, selected, sources, checked]);
+  }, [selectedSlice, selected, sources, checked, calibrating]);
   const targetName = sliceTarget ? (sliceTarget.parent?.name ?? sources.find(s => s.path === sliceTarget.source)?.name ?? '') : '';
 
   function worldBoxOf(source: string): Box | null {
@@ -165,21 +180,75 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   }
 
   function startSlicing() {
+    if (calibrating) return;
     if (!sliceTarget) { onError('Check a point cloud first, then slice it.'); return; }
     if (mode === 'persp') setMode('top');
     setSlicing(true);
   }
-  function finishRect(r: Rect) {
+  /** World point under the pointer on the slicing plane, or null outside axis views. */
+  function pointerWorld(e: React.PointerEvent): V3 | null {
     const rend = renderer.current;
-    if (!rend || !sliceTarget || mode === 'persp' || !rend.worldOrigin) return;
-    if (Math.abs(r.x1 - r.x0) < 4 || Math.abs(r.y1 - r.y0) < 4) return;
-    const a = rend.unproject(r.x0, r.y0), b = rend.unproject(r.x1, r.y1);
-    if (!a || !b) return;
-    const o = rend.worldOrigin;
+    if (!rend || !host.current || !rend.worldOrigin) return null;
+    const r = host.current.getBoundingClientRect();
+    const p = rend.unproject(e.clientX - r.left, e.clientY - r.top);
+    return p ? [p.x + rend.worldOrigin.x, p.y + rend.worldOrigin.y, p.z + rend.worldOrigin.z] : null;
+  }
+  function toScreen(p: V3): {x: number; y: number} | null {
+    const rend = renderer.current;
+    if (!rend?.worldOrigin) return null;
+    return rend.project(new THREE.Vector3(p[0] - rend.worldOrigin.x, p[1] - rend.worldOrigin.y, p[2] - rend.worldOrigin.z));
+  }
+  function onPointerDown(e: React.PointerEvent) {
+    if (!drawing || e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.tagName !== 'CANVAS' && !target.dataset.handle) return;
+    const ptr = pointerWorld(e);
+    if (!ptr) return;
+    const handle = ((e.target as HTMLElement).dataset.handle as Handle | undefined) ?? null;
+    if (handle && draft) drag.current = {handle, start: draft, origin: ptr};
+    else { const d = {p1: ptr, p2: ptr}; setDraft(d); drag.current = {handle: 'br', start: d, origin: ptr}; }
+    host.current?.setPointerCapture(e.pointerId);
+  }
+  function onPointerMove(e: React.PointerEvent) {
+    const d = drag.current;
+    if (!d || !renderer.current) return;
+    const ptr = pointerWorld(e);
+    if (!ptr) return;
+    const {h, v} = renderer.current.screenAxes();
+    const p1: V3 = [...d.start.p1], p2: V3 = [...d.start.p2];
+    const k = d.handle;
+    if (k === 'move') { for (const a of [h, v]) { const delta = ptr[a] - d.origin[a]; p1[a] += delta; p2[a] += delta; } }
+    else {
+      if (k === 'tl' || k === 'l' || k === 'bl') p1[h] = ptr[h];
+      if (k === 'tr' || k === 'r' || k === 'br') p2[h] = ptr[h];
+      if (k === 'tl' || k === 't' || k === 'tr') p1[v] = ptr[v];
+      if (k === 'bl' || k === 'b' || k === 'br') p2[v] = ptr[v];
+    }
+    setDraft({p1, p2});
+  }
+  function onPointerUp(e: React.PointerEvent) {
+    if (!drag.current) return;
+    drag.current = null;
+    host.current?.releasePointerCapture(e.pointerId);
+    setDraft(d => {
+      if (!d) return d;
+      const a = toScreen(d.p1), b = toScreen(d.p2);
+      if (!a || !b) return d;
+      if (Math.abs(a.x - b.x) < 4 && Math.abs(a.y - b.y) < 4) return null;
+      // Keep p1 as the screen top-left corner so handles stay where they look.
+      const {h, v} = renderer.current!.screenAxes();
+      const p1: V3 = [...d.p1], p2: V3 = [...d.p2];
+      if (a.x > b.x) { [p1[h], p2[h]] = [p2[h], p1[h]]; }
+      if (a.y > b.y) { [p1[v], p2[v]] = [p2[v], p1[v]]; }
+      return {p1, p2};
+    });
+  }
+  function commitDraft() {
+    if (!draft || !sliceTarget || mode === 'persp') return;
     const parentBox = sliceTarget.parent ? effectiveBox(sliceTarget.parent, slices) : worldBoxOf(sliceTarget.source);
     if (!parentBox) { onError('The point cloud is still loading.'); return; }
     const axis = DEPTH_AXIS[mode];
-    const lo: [number, number, number] = [a.x + o.x, a.y + o.y, a.z + o.z], hi: [number, number, number] = [b.x + o.x, b.y + o.y, b.z + o.z];
+    const lo: V3 = [...draft.p1], hi: V3 = [...draft.p2];
     lo[axis] = parentBox[0][axis]; hi[axis] = parentBox[1][axis];
     const box = intersect(normalize([lo, hi]), parentBox);
     if (!box) { onError(sliceTarget.parent ? 'The rectangle lies outside the parent slice.' : 'The rectangle lies outside the point cloud.'); return; }
@@ -191,8 +260,51 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         void saveSlices([...slices, slice]);
         setChecked(c => { const n = new Set(c); n.delete(parent ? parent.id : sliceTarget.source); n.add(slice.id); return n; });
         setSelected(slice.id);
+        setSlicing(false);
       }} />);
   }
+  /** Turn the target cloud about the axis the camera looks along; clockwise on screen is positive. */
+  function rotateView(degrees: number) {
+    const rend = renderer.current;
+    const source = sliceTarget?.source;
+    if (!rend || !source) return;
+    const d = rend.viewDirection();
+    applyOrientation(source, rotateAboutAxis(orientations[source] ?? IDENTITY, [d.x, d.y, d.z], degrees));
+  }
+  /** While calibrating, changes stay local; otherwise they are saved at once. */
+  function applyOrientation(source: string, o: Orientation) {
+    if (calibrating && calibrating.source === source) setCalibrating(c => (c ? {...c, current: o} : c));
+    else void saveOrientation(source, o);
+  }
+  function startCalibration(source: string) {
+    setSlicing(false);
+    setCalibrating({source, before: orientations[source] ?? IDENTITY, current: orientations[source] ?? IDENTITY, checkedBefore: checked, modeBefore: mode});
+    setChecked(new Set([source]));
+    setSelected(source);
+    if (mode === 'persp') setMode('front');
+  }
+  function endCalibration(save: boolean) {
+    if (!calibrating) return;
+    if (save) void saveOrientation(calibrating.source, calibrating.current);
+    setChecked(calibrating.checkedBefore);
+    setCalibrating(null);
+  }
+  function saveCalibrationAs() {
+    if (!calibrating || !project) return;
+    const box = worldBoxOf(calibrating.source);
+    const cloud = clouds.get(calibrating.source);
+    if (!box || !cloud) { onError('The point cloud is still loading.'); return; }
+    const source = calibrating.source, current = calibrating.current;
+    setDialog(<NameDialog title="Save leveled copy" label="File name" defaultValue={`${labelFor(source)} leveled`} confirm="Save"
+      note="Writes a new LAS file with this orientation applied. The original keeps its previous orientation." onCancel={() => setDialog(null)}
+      onSubmit={name => { setDialog(null); enqueue([{name, sources: [{path: source, boxes: [box], transform: transformFor(current, cloud.info.origin)}]}]); endCalibration(false); }} />);
+  }
+  const rotationLabel = (() => {
+    const o = sliceTarget ? orientations[sliceTarget.source] ?? IDENTITY : IDENTITY;
+    if (mode === 'top') return {name: 'Yaw', value: o.rotation[2]};
+    if (mode === 'front') return {name: 'Pitch', value: o.rotation[1]};
+    return {name: 'Roll', value: o.rotation[0]};
+  })();
 
   function deleteSlice(slice: Slice) {
     const kids = descendants(slice.id, slices);
@@ -240,12 +352,12 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         setDialog(null);
         if (kind === 'composite') { const groups = groupsFor(ids); if (groups) enqueue([{name, sources: groups}]); }
         else {
-          const jobs = ids.map(id => { const groups = groupsFor([id]); return groups ? {name: labelFor(id), sources: groups} : null; }).filter((j): j is {name: string; sources: {path: string; boxes: Box[]}[]} => !!j);
+          const jobs = ids.map(id => { const groups = groupsFor([id]); return groups ? {name: labelFor(id), sources: groups} : null; }).filter((j): j is ExportJob => !!j);
           enqueue(jobs);
         }
       }} />);
   }
-  function enqueue(jobs: {name: string; sources: {path: string; boxes: Box[]}[]}[]) {
+  function enqueue(jobs: ExportJob[]) {
     const clash = jobs.find(j => exportNames.has(j.name.toLowerCase()));
     if (clash) { onError(`An export named ${clash.name} already exists. Choose another name.`); return; }
     setQueue(q => [...q, ...jobs]);
@@ -278,7 +390,8 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       if (e.key === '7') setMode('top'); else if (e.key === '1') setMode('front'); else if (e.key === '3') setMode('side'); else if (e.key === '5') setMode('persp');
       else if (e.key === 'f') renderer.current?.frameVisible(true);
       else if (e.key === 's') (slicing ? setSlicing(false) : startSlicing());
-      else if (e.key === 'Escape') { if (rect) setRect(null); else if (slicing) setSlicing(false); }
+      else if (e.key === 'Escape') { if (draft) setDraft(null); else if (slicing) setSlicing(false); else if (calibrating) endCalibration(false); }
+      else if (e.key === 'Enter' && draft && slicing) commitDraft();
       else if ((e.key === 'Backspace' || e.key === 'Delete') && selectedSlice) deleteSlice(selectedSlice);
     };
     window.addEventListener('keydown', key);
@@ -309,12 +422,34 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const drawing = slicing && mode !== 'persp';
   return (
     <div className="viewer" onContextMenu={e => e.preventDefault()}>
-      <div className={'canvas-host' + (drawing ? ' drawing' : '')} ref={host}
-        onPointerDown={e => { if (!drawing || e.button !== 0) return; const r = host.current!.getBoundingClientRect(); setRect({x0: e.clientX - r.left, y0: e.clientY - r.top, x1: e.clientX - r.left, y1: e.clientY - r.top}); (e.target as HTMLElement).setPointerCapture?.(e.pointerId); }}
-        onPointerMove={e => { if (!rect) return; const r = host.current!.getBoundingClientRect(); setRect({...rect, x1: e.clientX - r.left, y1: e.clientY - r.top}); }}
-        onPointerUp={() => { if (!rect) return; const r = rect; setRect(null); finishRect(r); }}>
+      <div className={'canvas-host' + (drawing ? ' drawing' : '')} ref={host} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
         <canvas ref={canvas} />
-        {rect && <div className="rubber" style={{left: Math.min(rect.x0, rect.x1), top: Math.min(rect.y0, rect.y1), width: Math.abs(rect.x1 - rect.x0), height: Math.abs(rect.y1 - rect.y0)}} />}
+        {drawing && draft && <Rubber a={toScreen(draft.p1)} b={toScreen(draft.p2)} key={viewTick} />}
+        {mode !== 'persp' && sliceTarget && (slicing || calibrating) && (
+          <div className="rotate" onPointerDown={e => e.stopPropagation()}>
+            <span className="angle"><b>{rotationLabel.name}</b> {rotationLabel.value.toFixed(1)}°</span>
+            <span className="buttons">
+              {[-2, -0.5, -0.1].map(d => <button key={d} onClick={() => rotateView(d)} title={`Counterclockwise ${-d}°`}>↺ {-d}</button>)}
+              <i />
+              {[0.1, 0.5, 2].map(d => <button key={d} onClick={() => rotateView(d)} title={`Clockwise ${d}°`}>{d} ↻</button>)}
+            </span>
+          </div>
+        )}
+        {calibrating && (
+          <div className="slicebar calibrate" onPointerDown={e => e.stopPropagation()}>
+            <span>Calibrating {labelFor(calibrating.source)}. Level the ground, then turn it until edges line up.</span>
+            <button onClick={() => endCalibration(false)}>Cancel</button>
+            <button onClick={saveCalibrationAs}>Save as…</button>
+            <button className="primary" onClick={() => endCalibration(true)}>Save</button>
+          </div>
+        )}
+        {drawing && (
+          <div className="slicebar" onPointerDown={e => e.stopPropagation()}>
+            <span>{draft ? `Adjust the corners of the slice in ${targetName}, then press Done.` : `Drag a rectangle over ${targetName}.`}</span>
+            <button onClick={() => setSlicing(false)}>Cancel</button>
+            <button className="primary" disabled={!draft} onClick={commitDraft}>Done</button>
+          </div>
+        )}
         {compare && <div className="compare-labels"><span>{sources.filter(s => checked.has(s.path) && s.path !== compare).map(s => s.name).join(', ') || 'Slices'}</span><span>{labelFor(compare)}</span></div>}
         {!clouds.size && (
           <div className="viewer-empty">{loading.size ? <><Spinner /> Loading point cloud</> : sources.length ? 'Check a point cloud on the right to show it.' : 'No point clouds in this project yet. Process a scan or import a LAS or PLY file.'}</div>
@@ -329,7 +464,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         <button className="icon" disabled={mode === 'persp'} onClick={() => setFlipped(f => !f)} title="Look from the opposite side" aria-label="Flip view"><FlipHorizontal2 size={16} /></button>
         <button className="icon" onClick={() => renderer.current?.frameVisible(true)} title="Fit to view (f)" aria-label="Fit to view"><Maximize size={16} /></button>
         <span className="sep" />
-        <button className={'tool' + (slicing ? ' on' : '')} onClick={() => (slicing ? setSlicing(false) : startSlicing())} title="Draw a rectangle to cut a slice (s)"><Crop size={15} />Slice</button>
+        <button className={'tool' + (slicing ? ' on' : '')} disabled={!!calibrating} onClick={() => (slicing ? setSlicing(false) : startSlicing())} title="Draw a rectangle to cut a slice (s)"><Crop size={15} />Slice</button>
         {slicing && <span className="hint">{mode === 'persp' ? 'Choose Top, Front or Side' : `Drag to cut ${targetName}`}</span>}
         <span className="sep" />
         <label className="size" title="Point size"><input type="range" min={0.6} max={4} step={0.1} value={pointSize} onChange={e => setPointSize(+e.target.value)} aria-label="Point size" /></label>
@@ -342,14 +477,23 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
 
       {panel && (
         <aside className="cloud-panel">
-          <header><h2>Point clouds</h2><button className="icon" onClick={() => setPanel(false)} aria-label="Hide panel"><PanelRightClose size={17} /></button></header>
+          <header><h2>{calibrating ? 'Calibrate orientation' : 'Point clouds'}</h2><button className="icon" onClick={() => setPanel(false)} aria-label="Hide panel"><PanelRightClose size={17} /></button></header>
+          {calibrating ? (
+            <div className="tree">
+              <p className="pad muted">{labelFor(calibrating.source)}</p>
+              <OrientationEditor orientation={calibrating.current} onChange={o => applyOrientation(calibrating.source, o)}
+                onLevel={() => { const c = clouds.get(calibrating.source); const o = c ? levelGround(c.data, calibrating.current) : null; if (o) applyOrientation(calibrating.source, o); else onError('No dominant ground plane found. Adjust roll and pitch by hand.'); }} />
+              <p className="pad muted small">Use Front or Side to level and Top to turn. The buttons in the lower left rotate about the axis you look along. Save keeps the orientation with this cloud, Save as writes a new leveled LAS file.</p>
+            </div>
+          ) : (
           <div className="tree">
             {sources.map(s => (
               <React.Fragment key={s.path}>
                 <Row id={s.path} depth={0} name={s.name} detail={loading.has(s.path) ? 'Loading' : clouds.has(s.path) ? `${count(clouds.get(s.path)!.info.display_points)} of ${count(clouds.get(s.path)!.info.source_points)} shown` : s.detail}
-                  checked={checked.has(s.path)} selected={selected === s.path} compare={compare === s.path} onToggle={() => toggle(s.path)} onSelect={() => setSelected(s.path)}
+                  checked={checked.has(s.path)} selected={selected === s.path} compare={compare === s.path} calibrated={!isIdentity(orientations[s.path])} onToggle={() => toggle(s.path)} onSelect={() => setSelected(s.path)}
                   onMenu={e => openMenu(e, [
                     {label: 'Slice from here', onClick: () => { setSelected(s.path); setChecked(c => new Set(c).add(s.path)); startSlicing(); }},
+                    {label: 'Calibrate orientation…', onClick: () => startCalibration(s.path)},
                     {label: 'Export…', onClick: () => startExport([s.path])},
                     {label: compare === s.path ? 'Stop comparing' : 'Compare side by side', onClick: () => setCompare(compare === s.path ? null : s.path)},
                     {label: 'Show in Finder', onClick: () => api.reveal(s.path)},
@@ -360,12 +504,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
             ))}
             {!sources.length && <p className="muted pad">Nothing to show yet.</p>}
           </div>
-          {selectedSlice && <BoundsEditor slice={selectedSlice} onChange={box => updateBox(selectedSlice, box)} />}
-          {selected && !selectedSlice && clouds.has(selected) && (
-            <OrientationEditor orientation={orientations[selected] ?? IDENTITY} onChange={o => saveOrientation(selected, o)}
-              onLevel={() => { const o = levelGround(clouds.get(selected)!.data, orientations[selected] ?? IDENTITY); if (o) void saveOrientation(selected, o); else onError('No dominant ground plane found. Adjust roll and pitch by hand.'); }} />
           )}
-          <footer>
+          {selectedSlice && !calibrating && <BoundsEditor slice={selectedSlice} onChange={box => updateBox(selectedSlice, box)} />}
+          {!calibrating && <footer>
             {exporting ? (
               <div className="export-progress">
                 <span><Spinner size={12} /> Exporting {exporting.name}{exporting.total ? `, ${Math.round((exporting.done / exporting.total) * 100)}%` : ''}</span>
@@ -377,7 +518,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
               </button>
             )}
             {queue.length > 0 && <span className="muted">{queue.length} more waiting</span>}
-          </footer>
+          </footer>}
         </aside>
       )}
       {toast && <div className="toast">{toast}</div>}
@@ -404,12 +545,23 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   }
 }
 
-function Row({depth, name, detail, checked, selected, compare, onToggle, onSelect, onMenu}:
-  {id: string; depth: number; name: string; detail: string; checked: boolean; selected: boolean; compare?: boolean; onToggle: () => void; onSelect: () => void; onMenu: (e: React.MouseEvent) => void}) {
+function Rubber({a, b}: {a: {x: number; y: number} | null; b: {x: number; y: number} | null}) {
+  if (!a || !b) return null;
+  const left = Math.min(a.x, b.x), top = Math.min(a.y, b.y), width = Math.abs(a.x - b.x), height = Math.abs(a.y - b.y);
+  const handles: Handle[] = ['tl', 't', 'tr', 'l', 'r', 'bl', 'b', 'br'];
+  return (
+    <div className="rubber" style={{left, top, width, height}} data-handle="move">
+      {handles.map(h => <span key={h} className={`handle ${h}`} data-handle={h} />)}
+    </div>
+  );
+}
+
+function Row({depth, name, detail, checked, selected, compare, calibrated, onToggle, onSelect, onMenu}:
+  {id: string; depth: number; name: string; detail: string; checked: boolean; selected: boolean; compare?: boolean; calibrated?: boolean; onToggle: () => void; onSelect: () => void; onMenu: (e: React.MouseEvent) => void}) {
   return (
     <div className={'cloud-row' + (selected ? ' selected' : '')} style={{paddingLeft: 10 + depth * 18}} onClick={onSelect} onContextMenu={onMenu}>
       <input type="checkbox" checked={checked} onChange={onToggle} onClick={e => e.stopPropagation()} aria-label={`Show ${name}`} />
-      <span className="name">{name}{compare && <Columns2 size={12} className="compare-mark" />}</span>
+      <span className="name">{name}{calibrated && <Compass size={12} className="compare-mark" aria-label="Orientation calibrated" />}{compare && <Columns2 size={12} className="compare-mark" />}</span>
       <span className="detail">{detail}</span>
     </div>
   );
@@ -451,7 +603,6 @@ function OrientationEditor({orientation, onChange, onLevel}: {orientation: Orien
   useEffect(() => { setDraft({}); }, [orientation]);
   return (
     <div className="bounds orientation">
-      <h3>Orientation</h3>
       <div className="row"><button onClick={onLevel}>Level ground</button><button onClick={() => onChange(IDENTITY)} disabled={isIdentity(orientation)}>Reset</button></div>
       {fields.map(f => (
         <div className="axis" key={f.label}><span>{f.label}</span>
@@ -462,7 +613,6 @@ function OrientationEditor({orientation, onChange, onLevel}: {orientation: Orien
           <span className="unit">{f.unit}</span>
         </div>
       ))}
-      <small className="muted">Level ground fits the largest flat area and sets it to height 0. Arrow keys nudge a value.</small>
     </div>
   );
 }

@@ -19,6 +19,16 @@ export function quaternion(o: Orientation): THREE.Quaternion {
 }
 export const isIdentity = (o: Orientation | undefined) => !o || (o.rotation.every(v => v === 0) && o.translation.every(v => v === 0));
 
+/** Compose a rotation about a world axis (through the cloud origin) onto an orientation. */
+export function rotateAboutAxis(o: Orientation, axis: [number, number, number], degrees: number): Orientation {
+  const dq = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(...axis).normalize(), degrees * deg);
+  const total = dq.clone().multiply(quaternion(o));
+  const e = new THREE.Euler().setFromQuaternion(total, 'ZYX');
+  const t = new THREE.Vector3(...o.translation).applyQuaternion(dq);
+  const r = (v: number) => Math.round(v * 1000) / 1000;
+  return {rotation: [r(e.x / deg), r(e.y / deg), r(e.z / deg)], translation: [r(t.x), r(t.y), r(t.z)]};
+}
+
 /** Transform passed to unionMask and the exporter: world = R·local + origin + t. */
 export type Transform = {rotation: number[]; origin: number[]; translation: number[]};
 export function transformFor(o: Orientation | undefined, origin: number[]): Transform | null {
