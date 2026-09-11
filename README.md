@@ -37,7 +37,7 @@ The input must contain one `all_*.bag` and `info/calibration.yaml`. The capture 
 
 The result is `export/colorized.las`; intermediate products, source identities, per-stage receipts and `events.jsonl` live in the run directory. With `--no-color`, the result is `geometry/filtered.ply`, and camera-convention flags are unnecessary. Native coordinates are not automatically surveyed coordinates.
 
-Ctrl-C terminates the worker process group. To continue an interrupted run, repeat the **same command** with `--resume`. Input, code, native binary and completed-output hashes must match. Incomplete stage directories are retained under `incomplete/`; completed data is never silently overwritten. Only one process may own a run.
+Ctrl-C terminates the worker process group. To continue an interrupted run, repeat the **same command** with `--resume`. Inputs (by size and modification time), code, native binary and completed-output hashes must match. Incomplete stage directories are retained under `incomplete/`; completed data is never silently overwritten. Only one process may own a run.
 
 ## Supported options
 

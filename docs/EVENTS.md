@@ -16,7 +16,7 @@ Other events: `stage_completed`, `stage_cached`, `completed`, `failed`, `cancell
 
 Run data:
 
-- `job.json`: effective flags, external input hashes, Python/native source identities and executable hashes; used for resume equality.
+- `job.json`: effective flags, external input identities (size and modification time; large sources are not hashed), Python/native source identities and executable hashes; used for resume equality.
 - `hardware.json`: OS, CPU, core counts and memory. GPU utilization is explicitly unavailable.
 - `state.json`: atomically updated status/current stage/error.
 - `receipts/STAGE.json`: elapsed/resources and hashes of completed stage outputs.

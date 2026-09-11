@@ -10,6 +10,16 @@ from pathlib import Path
 from .storage import digest, validate_destination
 
 
+def source_identity(path):
+    """Cheap identity for large source files: size and modification time.
+
+    Source folders are assumed unchanged between runs, so the multi-gigabyte
+    bag is not hashed; resume still notices a replaced or rewritten file.
+    """
+    stat = Path(path).stat()
+    return {"bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
 def repository():
     # Source checkout is explicit; a wheel-only installation requires --native-dir.
     return Path(__file__).resolve().parents[2]
@@ -152,7 +162,7 @@ def prepare_job(args):
             bag=metadata["bag"], calibration=metadata["calibration"], capture=metadata["capture"]
         )
         sources = [args.capture]
-        identities = {p: digest(Path(p)) for p in [job["bag"], job["calibration"]]}
+        identities = {p: source_identity(p) for p in [job["bag"], job["calibration"]]}
         job["clock"] = args.camera_clock
         job["camera_convention"] = args.camera_convention
     else:
@@ -165,13 +175,13 @@ def prepare_job(args):
         )
         sources = [args.geometry, args.cameras, args.calibration]
         for key in ("geometry", "cameras", "calibration"):
-            identities[job[key]] = digest(Path(job[key]))
+            identities[job[key]] = source_identity(job[key])
         fs = load_camera_frames(args.cameras, args.calibration)
         if not fs:
             raise ValueError("No camera frames")
         for f in fs:
             sources.append(f.image_path)
-            identities[str(f.image_path)] = digest(f.image_path)
+            identities[str(f.image_path)] = source_identity(f.image_path)
             with Image.open(f.image_path) as im:
                 if im.size != (f.calibration.width, f.calibration.height):
                     raise ValueError("Image dimensions do not match calibration")
