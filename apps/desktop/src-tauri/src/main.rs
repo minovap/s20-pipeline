@@ -589,8 +589,12 @@ fn copy_scan(app: &tauri::AppHandle, state: &Engine, source: &Path, dest: &Path,
         let _ = app.emit("pipeline-event", v);
     };
     emit("stage_started", json!({}));
+    emit("progress", json!({"done": 0, "total": total, "unit": "bytes"}));
     let started = std::time::Instant::now();
     let mut buffer = vec![0u8; 8 << 20];
+    // Progress counts bytes flushed to disk, not bytes read: a source that is
+    // still in the file cache reads at memory speed and would race ahead.
+    const SYNC_EVERY: u64 = 64 << 20;
     for (path, size) in &files {
         if state.cancel_copy.load(Ordering::SeqCst) { return Err("cancelled".into()); }
         let relative = path.strip_prefix(source).map_err(|e| e.to_string())?;
@@ -604,19 +608,29 @@ fn copy_scan(app: &tauri::AppHandle, state: &Engine, source: &Path, dest: &Path,
         let mut reader = fs::File::open(path).map_err(|e| e.to_string())?;
         let mut writer = fs::File::create(&target).map_err(|e| e.to_string())?;
         use std::io::{Read, Write};
+        let file_start = done;
+        let mut written: u64 = 0;
+        let mut unsynced: u64 = 0;
         loop {
             if state.cancel_copy.load(Ordering::SeqCst) { drop(writer); let _ = fs::remove_file(&target); return Err("cancelled".into()); }
             let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 { break; }
             writer.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
-            done += n as u64;
-            if last.elapsed().as_millis() > 400 {
-                last = std::time::Instant::now();
-                emit("progress", json!({"done": done, "total": total, "unit": "bytes"}));
+            written += n as u64;
+            unsynced += n as u64;
+            if unsynced >= SYNC_EVERY {
+                writer.sync_data().map_err(|e| e.to_string())?;
+                unsynced = 0;
+                done = file_start + written;
+                if last.elapsed().as_millis() > 400 {
+                    last = std::time::Instant::now();
+                    emit("progress", json!({"done": done, "total": total, "unit": "bytes"}));
+                }
             }
         }
-        writer.flush().map_err(|e| e.to_string())?;
+        writer.sync_all().map_err(|e| e.to_string())?;
         writer.set_modified(modified).map_err(|e| e.to_string())?;
+        done = file_start + written;
     }
     emit("progress", json!({"done": total, "total": total, "unit": "bytes"}));
     emit("stage_completed", json!({"wall_s": started.elapsed().as_secs_f64()}));
