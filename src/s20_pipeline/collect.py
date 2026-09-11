@@ -699,22 +699,27 @@ def collect(
                     * np.maximum(incidence_for_score, 0.05) ** 2
                 )
                 score_count = len(score) if profile else 0
-                slot = np.argmin(scores[ids], axis=1)
-                take = score > scores[ids, slot]
-                ids = ids[take]
-                slot = slot[take]
-                u = u[take]
-                v = v[take]
-                score = score[take]
+                if native_visibility is None:
+                    slot = np.argmin(scores[ids], axis=1)
+                    take = score > scores[ids, slot]
+                    ids = ids[take]
+                    slot = slot[take]
+                    u = u[take]
+                    v = v[take]
+                    score = score[take]
+                    inserted_count = len(ids)
+                else:
+                    inserted_count = native_visibility.insert(c, ids, u, v, score, index)
                 rank_s = perf_counter() - rank_started if profile else 0.0
                 pack_started = perf_counter()
-                scores[ids, slot] = score
-                photo_ids[ids, slot] = index
-                uv[ids, slot, 0] = u
-                uv[ids, slot, 1] = v
+                if native_visibility is None:
+                    scores[ids, slot] = score
+                    photo_ids[ids, slot] = index
+                    uv[ids, slot, 0] = u
+                    uv[ids, slot, 1] = v
                 pack_s = perf_counter() - pack_started if profile else 0.0
                 return {
-                    "inserted": len(ids),
+                    "inserted": inserted_count,
                     "surface_patch_rejections": rejected_chunk,
                     "valid": valid_count,
                     "passes_exact_depth": passes_exact_depth,

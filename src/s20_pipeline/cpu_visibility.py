@@ -36,9 +36,11 @@ class CpuVisibility:
         if not len(self.xyz) or len(self.xyz) > np.iinfo(np.uint32).max:
             raise ValueError("Native visibility point count must fit uint32")
         self.library = ctypes.CDLL(str(library))
-        self._configure()
-        if self.library.s20_visibility_abi_version() != 1:
+        self.library.s20_visibility_abi_version.argtypes = []
+        self.library.s20_visibility_abi_version.restype = ctypes.c_uint32
+        if self.library.s20_visibility_abi_version() != 2:
             raise RuntimeError("Unsupported native visibility ABI")
+        self._configure()
     def _configure(self):
         float_pointer = ctypes.POINTER(ctypes.c_float)
         double_pointer = ctypes.POINTER(ctypes.c_double)
@@ -69,6 +71,18 @@ class CpuVisibility:
             ulong_pointer,
         ]
         self.library.s20_visibility_decide.restype = ctypes.c_int
+        self.library.s20_rank_insert.argtypes = [
+            float_pointer,
+            ctypes.c_uint64,
+            uint_pointer,
+            float_pointer,
+            float_pointer,
+            float_pointer,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ulong_pointer,
+        ]
+        self.library.s20_rank_insert.restype = ctypes.c_int
 
     def decide(self, ids, u, v, distance, blocker_keys, exact_keys, frame, mask):
         ids = np.asarray(ids)
@@ -144,6 +158,42 @@ class CpuVisibility:
             mask if mask.dtype in (np.dtype(np.bool_), np.dtype(np.uint8)) else mask != 0,
             dtype=np.uint8,
         )
+
+    def insert(self, observations, ids, u, v, scores, photo):
+        """Insert one photo's candidates; ids must be unique within the call."""
+        observations = np.asarray(observations)
+        if (
+            observations.dtype != np.float32
+            or observations.shape != (len(self.xyz), 4, 8)
+            or not observations.flags.c_contiguous
+            or not observations.flags.writeable
+        ):
+            raise ValueError("Native ranking expects writable contiguous n x 4 x 8 float32 records")
+        ids = np.asarray(ids)
+        if ids.ndim != 1 or ids.dtype != np.uint32 or not ids.flags.c_contiguous:
+            raise ValueError("Native ranking point IDs must be contiguous uint32")
+        u = np.ascontiguousarray(u, dtype=np.float32)
+        v = np.ascontiguousarray(v, dtype=np.float32)
+        scores = np.ascontiguousarray(scores, dtype=np.float32)
+        if any(value.ndim != 1 or len(value) != len(ids) for value in (u, v, scores)):
+            raise ValueError("Native ranking inputs must be equal-length vectors")
+        if not 0 <= photo <= np.iinfo(np.uint32).max:
+            raise ValueError("Native ranking photo ID must fit uint32")
+        inserted = ctypes.c_uint64()
+        result = self.library.s20_rank_insert(
+            observations.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(self.xyz),
+            ids.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+            u.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            v.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(ids),
+            photo,
+            ctypes.byref(inserted),
+        )
+        if result:
+            raise RuntimeError(f"Native ranking failed with error {result}")
+        return inserted.value
 
     def stats(self):
         return {

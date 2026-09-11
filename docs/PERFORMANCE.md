@@ -168,3 +168,15 @@ Reliability short-circuits are exact: a denominator at or below the float32 `0.1
 The native fusion is **18.2% faster** than the preceding checkpoint (`1.222×`). Profiling reduced visibility/color wall time from 5.249 s to 2.170 s and summed decision worker time from 18.884 s to 3.158 s. A final run after ABI hardening measured 12.863 s and remained byte-identical. Photo-loop sampled RSS was 1.95–2.04 GB; whole-stage sampled peaks varied with final file-backed materialization and are not used to claim an RSS improvement. Releasing the native wrapper before finalization is important because it owns references to both 12-byte-per-point geometry arrays.
 
 Validation includes exact float32 incidence bits, threshold neighbors around positive and negative `0.15`, translated centers, unusual non-byte masks, concurrent calls, native-versus-NumPy collector integration and four byte-for-byte full frozen-scan comparisons. The combined median improvement from the original 24.390-second CPU baseline is **46.8%** (`1.879×`).
+
+
+## Native chronological rank insertion, 12 September 2026
+
+After NumPy computes the unchanged float32 score, the native CPU library now scans the point's four stored scores, selects the first strict minimum and writes accepted `u`, `v`, photo ID and score directly into the canonical record. It preserves the chronological `new_score > minimum` rule and disjoint per-photo point ownership. This removes the `N×4` advanced-index score copy, slot/take arrays, accepted-value copies and four separate NumPy scatter assignments without changing transcendental arithmetic.
+
+| Collector | Candidate-stage wall samples | Median wall |
+|---|---|---:|
+| Native visibility/mask only | 12.981 s, 12.834 s, 13.018 s | 12.981 s |
+| Native rank insertion | 11.918 s, 12.096 s, 11.996 s | 11.996 s |
+
+This is a further **7.59% wall-time reduction** (`1.082×`). Profiled color wall time fell from 2.170 s to 1.521 s; summed rank worker time fell from 4.832 s to 1.736 s and the separate scatter timer fell from 1.652 s to zero. All three observation files match the frozen golden file byte for byte. Tests cover first-minimum ties, overwrite history, infinity and NaN inputs, exact insertion counts and untouched fields. The combined median improvement from the original 24.390-second CPU baseline is **50.8%** (`2.033×`).

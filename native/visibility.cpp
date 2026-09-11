@@ -19,7 +19,56 @@ inline float dot3(const float *a, float x, float y, float z) {
 
 }  // namespace
 
-extern "C" uint32_t s20_visibility_abi_version() { return 1u; }
+extern "C" uint32_t s20_visibility_abi_version() { return 2u; }
+
+extern "C" int s20_rank_insert(
+    float *observations,
+    uint64_t point_count,
+    const uint32_t *point_ids,
+    const float *u,
+    const float *v,
+    const float *scores,
+    uint64_t count,
+    uint32_t photo,
+    uint64_t *inserted
+) {
+    if (!observations || !inserted || (count > 0 && (!point_ids || !u || !v || !scores))) {
+        return 1;
+    }
+    uint64_t accepted = 0;
+    const float photo_value = static_cast<float>(photo);
+    for (uint64_t index = 0; index < count; ++index) {
+        const uint32_t point_id = point_ids[index];
+        if (point_id >= point_count) return 2;
+        float *point = observations + size_t(point_id) * 4u * 8u;
+        uint32_t slot = 0;
+        float minimum = point[7];
+        if (!std::isnan(minimum)) {
+            for (uint32_t candidate = 1; candidate < 4; ++candidate) {
+                const float candidate_score = point[size_t(candidate) * 8u + 7u];
+                if (std::isnan(candidate_score)) {
+                    minimum = candidate_score;
+                    slot = candidate;
+                    break;
+                }
+                if (candidate_score < minimum) {
+                    minimum = candidate_score;
+                    slot = candidate;
+                }
+            }
+        }
+        if (scores[index] > minimum) {
+            float *destination = point + size_t(slot) * 8u;
+            destination[0] = u[index];
+            destination[1] = v[index];
+            destination[6] = photo_value;
+            destination[7] = scores[index];
+            ++accepted;
+        }
+    }
+    *inserted = accepted;
+    return 0;
+}
 
 extern "C" int s20_visibility_decide(
     const float *points,

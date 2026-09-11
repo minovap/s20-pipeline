@@ -164,3 +164,43 @@ def test_native_visibility_matches_threshold_neighbors_and_concurrent_calls():
     for result in results:
         np.testing.assert_array_equal(result.flags, expected_flags)
         np.testing.assert_array_equal(result.incidence.view("uint32"), expected[3].view("uint32"))
+
+
+@native_required
+def test_native_ranking_matches_chronological_strict_numpy_updates():
+    point_count = 19
+    xyz = np.zeros((point_count, 3), dtype="float32")
+    native = CpuVisibility(xyz, xyz, LIBRARY)
+    expected = np.zeros((point_count, 4, 8), dtype="float32")
+    actual = np.zeros_like(expected)
+    ids = np.arange(point_count, dtype="uint32")
+    u = ids.astype("float32") + np.float32(0.25)
+    v = ids.astype("float32") + np.float32(0.75)
+    score_rows = (
+        np.full(point_count, 0.9, dtype="float32"),
+        np.full(point_count, 0.9, dtype="float32"),
+        np.full(point_count, 0.9, dtype="float32"),
+        np.full(point_count, 0.9, dtype="float32"),
+        np.full(point_count, 1.0, dtype="float32"),
+        np.linspace(0.1, 1.1, point_count, dtype="float32"),
+        np.full(point_count, np.inf, dtype="float32"),
+        np.full(point_count, np.nan, dtype="float32"),
+    )
+    for photo, score in enumerate(score_rows):
+        slot = np.argmin(expected[ids, :, 7], axis=1)
+        take = score > expected[ids, slot, 7]
+        expected[ids[take], slot[take], 0] = u[take]
+        expected[ids[take], slot[take], 1] = v[take]
+        expected[ids[take], slot[take], 6] = photo
+        expected[ids[take], slot[take], 7] = score[take]
+        inserted = native.insert(actual, ids, u, v, score, photo)
+        assert inserted == np.count_nonzero(take)
+        np.testing.assert_array_equal(actual, expected)
+
+    expected[0, 2, 7] = np.nan
+    actual[0, 2, 7] = np.nan
+    inserted = native.insert(actual, ids[:1], u[:1], v[:1], np.array([2], dtype="float32"), 9)
+    assert inserted == 0
+    np.testing.assert_array_equal(actual.view("uint32"), expected.view("uint32"))
+    with pytest.raises(ValueError, match="photo ID"):
+        native.insert(actual, ids[:1], u[:1], v[:1], np.array([2], dtype="float32"), -1)
