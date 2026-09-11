@@ -36,6 +36,7 @@ struct Engine {
     pid: AtomicU32,
     export_pid: AtomicU32,
     exporting: AtomicBool,
+    cancel_copy: AtomicBool,
     previews: Mutex<HashMap<String, PathBuf>>,
 }
 
@@ -266,6 +267,8 @@ fn read_run(folder: &Path) -> Option<Value> {
         folder.join("geometry/filtered.ply")
     };
     let result_exists = result.is_file() && status == "completed";
+    let copy = read_json(&folder.join("copy.json"));
+    let capture = copy.as_ref().and_then(|c| c["source"].as_str().map(|s| json!(s))).unwrap_or(job["capture"].clone());
     Some(json!({
         "path": folder,
         "name": folder.file_name().and_then(|n| n.to_str()).unwrap_or(""),
@@ -274,8 +277,9 @@ fn read_run(folder: &Path) -> Option<Value> {
         "error": state["error"],
         "started": started,
         "finished": finished,
-        "capture": job["capture"],
+        "capture": capture,
         "options": {
+            "copy": copy.is_some(),
             "color": color,
             "mask": job["options"]["mask"],
             "exposure": job["options"]["exposure"],
@@ -464,7 +468,7 @@ fn read_stage_log(run: String, stage: String, state: State<Engine>) -> Result<St
     Ok(String::from_utf8_lossy(tail).into_owned())
 }
 #[tauri::command]
-fn delete_run(run: String, state: State<Engine>) -> Result<(), String> {
+fn delete_run(run: String, app: tauri::AppHandle, state: State<Engine>) -> Result<(), String> {
     if state.running.load(Ordering::SeqCst) {
         return Err("Wait for the active job to finish first".into());
     }
@@ -475,6 +479,9 @@ fn delete_run(run: String, state: State<Engine>) -> Result<(), String> {
         && folder.join("job.json").is_file();
     if !is_run {
         return Err("Not a run folder".into());
+    }
+    if let Some(copy) = read_json(&folder.join("copy.json")) {
+        if let Some(source) = copy["source"].as_str() { remove_temp_copy(&app, &run, source); }
     }
     fs::remove_dir_all(folder).map_err(|e| e.to_string())
 }
@@ -504,6 +511,8 @@ struct JobOptions {
     exposure: String,
     pose_refinement: bool,
     resume: bool,
+    #[serde(default)]
+    copy: bool,
 }
 fn job_args(o: &JobOptions) -> Result<Vec<String>, String> {
     if !["interactive", "balanced", "throughput"].contains(&o.resources.as_str())
@@ -549,13 +558,90 @@ fn job_args(o: &JobOptions) -> Result<Vec<String>, String> {
     }
     Ok(a)
 }
+/// Where a run's temporary scan copy lives: ~/Downloads/S20 temp/<run>/<scan>.
+fn temp_copy_dir(app: &tauri::AppHandle, output: &str, capture: &str) -> Result<PathBuf, String> {
+    let run = Path::new(output).file_name().and_then(|n| n.to_str()).ok_or("Invalid run folder")?;
+    let scan = Path::new(capture).file_name().and_then(|n| n.to_str()).ok_or("Invalid scan folder")?;
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    Ok(downloads.join("S20 temp").join(run).join(scan))
+}
+fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let meta = entry.metadata().map_err(|e| e.to_string())?;
+        if meta.is_dir() { walk(&path, out)?; } else if meta.is_file() { out.push((path, meta.len())); }
+    }
+    Ok(())
+}
+/// Copy a scan folder with progress events. Modification times are kept so
+/// the pipeline's size-and-mtime input identity matches on resume. Files
+/// already present with the same size and mtime are skipped.
+fn copy_scan(app: &tauri::AppHandle, state: &Engine, source: &Path, dest: &Path, run_id: &str) -> Result<(), String> {
+    let mut files = Vec::new();
+    walk(source, &mut files)?;
+    let total: u64 = files.iter().map(|(_, n)| n).sum();
+    let mut done: u64 = 0;
+    let mut last = std::time::Instant::now();
+    let emit = |event: &str, extra: Value| {
+        let mut v = json!({"event": event, "stage": "copy", "run_id": run_id, "time_unix": now()});
+        if let Some(o) = extra.as_object() { for (k, val) in o { v[k] = val.clone(); } }
+        let _ = app.emit("pipeline-event", v);
+    };
+    emit("stage_started", json!({}));
+    let started = std::time::Instant::now();
+    let mut buffer = vec![0u8; 8 << 20];
+    for (path, size) in &files {
+        if state.cancel_copy.load(Ordering::SeqCst) { return Err("cancelled".into()); }
+        let relative = path.strip_prefix(source).map_err(|e| e.to_string())?;
+        let target = dest.join(relative);
+        if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+        let src_meta = fs::metadata(path).map_err(|e| e.to_string())?;
+        let modified = src_meta.modified().map_err(|e| e.to_string())?;
+        if let Ok(existing) = fs::metadata(&target) {
+            if existing.len() == *size && existing.modified().ok() == Some(modified) { done += size; continue; }
+        }
+        let mut reader = fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut writer = fs::File::create(&target).map_err(|e| e.to_string())?;
+        use std::io::{Read, Write};
+        loop {
+            if state.cancel_copy.load(Ordering::SeqCst) { drop(writer); let _ = fs::remove_file(&target); return Err("cancelled".into()); }
+            let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            writer.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+            done += n as u64;
+            if last.elapsed().as_millis() > 400 {
+                last = std::time::Instant::now();
+                emit("progress", json!({"done": done, "total": total, "unit": "bytes"}));
+            }
+        }
+        writer.flush().map_err(|e| e.to_string())?;
+        writer.set_modified(modified).map_err(|e| e.to_string())?;
+    }
+    emit("progress", json!({"done": total, "total": total, "unit": "bytes"}));
+    emit("stage_completed", json!({"wall_s": started.elapsed().as_secs_f64()}));
+    Ok(())
+}
+fn remove_temp_copy(app: &tauri::AppHandle, output: &str, capture: &str) {
+    if let Ok(dir) = temp_copy_dir(app, output, capture) {
+        let _ = fs::remove_dir_all(&dir);
+        if let Some(run_dir) = dir.parent() { let _ = fs::remove_dir(run_dir); }
+    }
+}
+
 #[tauri::command]
 fn start_job(
     options: JobOptions,
     app: tauri::AppHandle,
     state: State<Engine>,
 ) -> Result<(), String> {
-    let args = job_args(&options)?;
+    let mut effective = options.clone();
+    let temp = if options.copy {
+        let dir = temp_copy_dir(&app, &options.output, &options.capture)?;
+        effective.capture = dir.to_string_lossy().into_owned();
+        Some(dir)
+    } else { None };
+    let args = job_args(&effective)?;
     let mut command = python(&root(&state)?)?;
     if state
         .running
@@ -567,33 +653,48 @@ fn start_job(
     if let Some(parent) = Path::new(&options.output).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let child = command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            state.running.store(false, Ordering::SeqCst);
-            return Err(e.to_string());
-        }
-    };
-    state.pid.store(child.id(), Ordering::SeqCst);
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let run_id = options.output;
-    let errapp = app.clone();
-    let errid = run_id.clone();
+    state.cancel_copy.store(false, Ordering::SeqCst);
+    let run_id = options.output.clone();
+    let source = PathBuf::from(options.capture.clone());
+    let output = options.output.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let _ = errapp.emit(
-                "job-log",
-                json!({"run_id":errid,"message":line.chars().take(3000).collect::<String>()}),
-            );
+        let state = app.state::<Engine>();
+        if let Some(dir) = &temp {
+            if let Err(e) = copy_scan(&app, &state, &source, dir, &run_id) {
+                let cancelled = e == "cancelled";
+                let _ = app.emit("pipeline-event", json!({"event": if cancelled { "cancelled" } else { "failed" }, "stage": "copy", "run_id": run_id, "message": if cancelled { "Copy cancelled".to_string() } else { format!("Copying the scan failed: {e}") }, "time_unix": now()}));
+                state.running.store(false, Ordering::SeqCst);
+                let _ = app.emit("job-exit", json!({"run_id": run_id, "code": if cancelled { 130 } else { 1 }}));
+                return;
+            }
         }
-    });
-    std::thread::spawn(move || {
+        let child = command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = app.emit("job-log", json!({"run_id": run_id, "message": e.to_string()}));
+                state.running.store(false, Ordering::SeqCst);
+                let _ = app.emit("job-exit", json!({"run_id": run_id, "code": 1}));
+                return;
+            }
+        };
+        state.pid.store(child.id(), Ordering::SeqCst);
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let errapp = app.clone();
+        let errid = run_id.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let _ = errapp.emit(
+                    "job-log",
+                    json!({"run_id":errid,"message":line.chars().take(3000).collect::<String>()}),
+                );
+            }
+        });
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
                 if value.is_object() {
@@ -603,9 +704,13 @@ fn start_job(
             }
         }
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-        let state = app.state::<Engine>();
         state.pid.store(0, Ordering::SeqCst);
         state.running.store(false, Ordering::SeqCst);
+        if temp.is_some() {
+            // Record the copy so run history and resume know the real source.
+            let _ = write_json(&Path::new(&output).join("copy.json"), &json!({"source": source, "temp": effective.capture}));
+            if code == 0 { remove_temp_copy(&app, &output, &source.to_string_lossy()); }
+        }
         let _ = app.emit("job-exit", json!({"run_id":run_id,"code":code}));
     });
     Ok(())
@@ -614,6 +719,7 @@ fn start_job(
 fn cancel_job(state: State<Engine>) -> Result<(), String> {
     let pid = state.pid.load(Ordering::SeqCst);
     if pid == 0 {
+        state.cancel_copy.store(true, Ordering::SeqCst);
         return Ok(());
     }
     let result = unsafe { libc::kill(pid as i32, libc::SIGINT) };
@@ -829,6 +935,7 @@ fn main() {
                 pid: AtomicU32::new(0),
                 export_pid: AtomicU32::new(0),
                 exporting: AtomicBool::new(false),
+                cancel_copy: AtomicBool::new(false),
                 previews: Mutex::new(HashMap::new()),
             });
             Ok(())
@@ -899,6 +1006,7 @@ mod tests {
             exposure: "local".into(),
             pose_refinement: true,
             resume: false,
+            copy: false,
         }
     }
     #[test]

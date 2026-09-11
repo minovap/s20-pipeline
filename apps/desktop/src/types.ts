@@ -10,15 +10,17 @@ export type Capture = {
 };
 export type Estimate = {estimated_seconds: number | null; range_seconds: [number, number] | null; confidence: string};
 
-export type Input = {path: string; name: string; added: number; capture: Capture; estimate?: Estimate | null};
+export type Input = {path: string; name: string; added: number; capture: Capture; estimate?: Estimate | null; copy?: boolean};
+/** External drives on macOS mount under /Volumes. */
+export const onExternalDrive = (path: string) => path.startsWith('/Volumes/');
 
-export type Options = {resources: string; memory_gb: number; color: boolean; mask: string; exposure: string; pose_refinement: boolean};
+export type Options = {resources: string; memory_gb: number; color: boolean; mask: string; exposure: string; pose_refinement: boolean; copy?: boolean};
 export const DEFAULT_OPTIONS: Options = {resources: 'balanced', memory_gb: 16, color: true, mask: 'person', exposure: 'local', pose_refinement: true};
 
 export type Job = Options & {capture: string; output: string; resume: boolean};
 
 export type StageStatus = 'pending' | 'running' | 'complete' | 'cached' | 'failed' | 'cancelled' | 'incomplete' | 'skipped';
-export type StageState = {id: string; status: StageStatus; done?: number; total?: number; wall_s?: number | null; startedAt?: number};
+export type StageState = {id: string; status: StageStatus; done?: number; total?: number; unit?: string; wall_s?: number | null; startedAt?: number};
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'starting' | 'unknown';
 export type Run = {
@@ -44,7 +46,7 @@ export type Project = {
 export type Settings = {engine_root: string; engine_ready: boolean; projects_root: string; running: boolean};
 
 export type PipelineEvent = {
-  event: string; stage?: string; done?: number; total?: number; wall_s?: number; rss_bytes?: number; cpu_core_equivalents?: number | null;
+  event: string; stage?: string; done?: number; total?: number; unit?: string; wall_s?: number; rss_bytes?: number; cpu_core_equivalents?: number | null;
   system_available_memory_bytes?: number; message?: string; run_id: string; time_unix?: number;
 };
 export type ExportEvent = {id: string; name: string; event: 'progress' | 'completed' | 'failed' | 'cancelled'; done?: number; total?: number; file?: string; points?: number; message?: string};
@@ -54,7 +56,8 @@ export type Cloud = {info: Preview; data: Float32Array};
 
 // Stage order matches s20_pipeline.runner.stage_names. Groups give the long
 // list a shape; labels say what the step produces in plain words.
-export const STAGES: {id: string; label: string; group: 'Geometry' | 'Color'}[] = [
+export const STAGES: {id: string; label: string; group: 'Prepare' | 'Geometry' | 'Color'}[] = [
+  {id: 'copy', label: 'Copy scan to this Mac', group: 'Prepare'},
   {id: 'decode', label: 'Decode LiDAR and IMU', group: 'Geometry'},
   {id: 'pack', label: 'Validate and pack frames', group: 'Geometry'},
   {id: 'tracking', label: 'Track motion and deskew', group: 'Geometry'},
@@ -72,8 +75,9 @@ export const STAGES: {id: string; label: string; group: 'Geometry' | 'Color'}[] 
 ];
 export const stageLabel = (id: string) => STAGES.find(s => s.id === id)?.label ?? id;
 
-export function stagesFor(job: Pick<Options, 'color' | 'pose_refinement' | 'mask' | 'exposure'>) {
+export function stagesFor(job: Pick<Options, 'color' | 'pose_refinement' | 'mask' | 'exposure' | 'copy'>) {
   return STAGES.filter(({id, group}) => {
+    if (id === 'copy' && !job.copy) return false;
     if (id === 'pose_refinement' && !job.pose_refinement) return false;
     if (group === 'Color' && !job.color) return false;
     if (id === 'masks' && job.mask === 'off') return false;

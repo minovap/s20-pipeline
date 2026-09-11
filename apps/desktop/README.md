@@ -34,7 +34,12 @@ the app reconstructs run history from the pipeline's own `job.json`,
 
 **Scans.** A scan is a raw capture folder referenced in place. It is inspected
 once when added and only ever read. If the drive is unmounted the scan shows a
-warning and cannot be processed until it is back.
+warning and cannot be processed until it is back. A scan added from an
+external drive (`/Volumes`) offers "Copy before processing": each run then
+starts with a visible copy step into `~/Downloads/S20 temp/<run>/`, processes
+from the copy, and deletes it when the run succeeds. Cancelled or failed runs
+keep the copy so Resume is fast; deleting the run removes it. The setting can
+be changed later from the scan's right-click menu.
 
 **Runs.** New run shows four choices (result type, remove people, exposure,
 performance) plus memory limit and pose refinement under Advanced. While a run

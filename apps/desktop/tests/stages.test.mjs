@@ -8,6 +8,10 @@ test('geometry-only job excludes every photo stage', () => {
   const ids = stagesFor({color: false, mask: 'person', exposure: 'local', pose_refinement: true}).map(s => s.id);
   assert.deepEqual(ids, ['decode', 'pack', 'tracking', 'pose_refinement', 'registered', 'geometry']);
 });
+test('copy step appears only when the scan is copied first', () => {
+  assert.equal(stagesFor({color: false, mask: 'off', exposure: 'off', pose_refinement: false, copy: true}).map(s => s.id)[0], 'copy');
+  assert(!stagesFor({color: false, mask: 'off', exposure: 'off', pose_refinement: false}).some(s => s.id === 'copy'));
+});
 test('optional stages follow effective processing options', () => {
   const ids = stagesFor({color: true, mask: 'off', exposure: 'off', pose_refinement: false}).map(s => s.id);
   assert(!ids.includes('local')); assert(!ids.includes('global')); assert(!ids.includes('masks')); assert(!ids.includes('pose_refinement'));

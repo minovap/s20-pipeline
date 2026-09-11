@@ -61,7 +61,7 @@ function App() {
         update(r => ({...r, status: 'running', order: r.order.includes(id) ? r.order : [...r.order, id], stages: {...r.stages, [id]: {id, status: 'cached'}}}));
       } else if (e.event === 'progress' && e.stage) {
         const id = e.stage;
-        update(r => ({...r, stages: {...r.stages, [id]: {...r.stages[id], id, status: 'running', done: e.done, total: e.total}}}));
+        update(r => ({...r, stages: {...r.stages, [id]: {...r.stages[id], id, status: 'running', done: e.done, total: e.total, unit: e.unit}}}));
       } else if (e.event === 'stage_completed' && e.stage) {
         const id = e.stage;
         update(r => ({...r, stages: {...r.stages, [id]: {id, status: 'complete', wall_s: e.wall_s ?? (r.stages[id]?.startedAt ? (t - r.stages[id].startedAt!) / 1000 : null)}}}));
@@ -93,11 +93,11 @@ function App() {
   }, []);
 
   async function startRun(project: Project, input: Input, options: Options) {
-    const job: Job = {...options, capture: input.path, output: `${project.path}/runs/${runFolderName()}`, resume: false};
+    const job: Job = {...options, copy: !!input.copy, capture: input.path, output: `${project.path}/runs/${runFolderName()}`, resume: false};
     await launch(project.path, job);
   }
   async function resumeRun(project: Project, run: Run) {
-    const job: Job = {...run.options, capture: run.capture, output: run.path, resume: true};
+    const job: Job = {...run.options, copy: !!run.options.copy, capture: run.capture, output: run.path, resume: true};
     await launch(project.path, job, run);
   }
   async function launch(projectPath: string, job: Job, previous?: Run) {

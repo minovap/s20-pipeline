@@ -1,12 +1,12 @@
 // One project: scans on the left, the selected run (or a new run) on the right.
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {AlertTriangle, ChevronLeft, FolderOpen, Play, Plus, Settings2, Square} from 'lucide-react';
+import {AlertTriangle, ChevronLeft, FolderOpen, HardDrive, Play, Plus, Settings2, Square} from 'lucide-react';
 import {api, errorText, pickCloud, pickFolder} from './api';
 import {basename, bytes, count, duration, roughRange, when} from './format';
 import {Pipeline} from './Pipeline';
 import {statusWord} from './Projects';
-import {ConfirmDialog, NameDialog, Segmented, Spinner, Toggle, useContextMenu} from './ui';
-import {DEFAULT_OPTIONS, stagesFor} from './types';
+import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, Toggle, useContextMenu} from './ui';
+import {DEFAULT_OPTIONS, onExternalDrive, stagesFor} from './types';
 import type {Input, Options, Project, Run, Settings, StageState} from './types';
 import type {LiveRun} from './main';
 
@@ -66,9 +66,31 @@ export function ProjectScreen(props: {
     const p = await pickFolder('Choose a raw S20 scan folder');
     if (!p || !project) return;
     setAdding(true);
-    try { setProject(await api.addInput(project.path, p)); setAvailable(a => ({...a, [p]: true})); }
+    try {
+      const next = await api.addInput(project.path, p);
+      setProject(next);
+      setAvailable(a => ({...a, [p]: true}));
+      const input = next.inputs.find(i => i.path === p) ?? next.inputs[next.inputs.length - 1];
+      if (input && onExternalDrive(input.path)) askCopy(next, input);
+    }
     catch (e) { onError(errorText(e)); }
     finally { setAdding(false); }
+  }
+  function askCopy(current: Project, input: Input) {
+    const choose = async (copy: boolean) => {
+      setDialog(null);
+      try { setProject(await api.writeProject(current.path, {inputs: current.inputs.map(i => (i.path === input.path ? {...i, copy} : i))})); } catch (e) { onError(errorText(e)); }
+    };
+    setDialog(
+      <Modal title="Scan is on an external drive" onClose={() => choose(false)} width={480}>
+        <p className="note">Reading {bytes(input.capture.bag_bytes)} straight from a card or external drive makes every run slower. The scan can be copied to this Mac first as part of each run and removed again when the run finishes.</p>
+        <footer><button onClick={() => choose(false)}>Read in place</button><button className="primary" onClick={() => choose(true)}>Copy before processing</button></footer>
+      </Modal>
+    );
+  }
+  async function setCopy(input: Input, copy: boolean) {
+    if (!project) return;
+    try { setProject(await api.writeProject(project.path, {inputs: project.inputs.map(i => (i.path === input.path ? {...i, copy} : i))})); } catch (e) { onError(errorText(e)); }
   }
   async function removeInput(input: Input) {
     if (!project) return;
@@ -114,8 +136,11 @@ export function ProjectScreen(props: {
             <ul className="rows compact">
               {project.inputs.map(i => (
                 <li key={i.path}>
-                  <div className="rowbutton static" onContextMenu={e => openMenu(e, [{label: 'Show in Finder', onClick: () => api.reveal(i.path), disabled: available[i.path] === false}, {label: 'Remove from project', onClick: () => removeInput(i), danger: true, disabled: busy}])}>
-                    <strong>{i.name}{available[i.path] === false && <span className="warn" title="Folder not found. Mount the SD card or drive."><AlertTriangle size={12} /></span>}</strong>
+                  <div className="rowbutton static" onContextMenu={e => openMenu(e, [
+                    {label: i.copy ? 'Read in place instead' : 'Copy to this Mac before processing', onClick: () => setCopy(i, !i.copy), disabled: busy},
+                    {label: 'Show in Finder', onClick: () => api.reveal(i.path), disabled: available[i.path] === false},
+                    {label: 'Remove from project', onClick: () => removeInput(i), danger: true, disabled: busy}])}>
+                    <strong>{i.name}{available[i.path] === false && <span className="warn" title="Folder not found. Mount the SD card or drive."><AlertTriangle size={12} /></span>}{i.copy && <span className="muted" title="Copied to this Mac before each run"><HardDrive size={12} /></span>}</strong>
                     <span className="muted">{duration(i.capture.bag_duration_s)} scan, {i.capture.lidar_frames.toLocaleString()} frames, {i.capture.photos} photos, {bytes(i.capture.bag_bytes)}</span>
                   </div>
                 </li>
@@ -190,7 +215,7 @@ function NewRun({project, settings, busy, available, onAddInput, onStart}:
   const [advanced, setAdvanced] = useState(false);
   const [starting, setStarting] = useState(false);
   const set = (patch: Partial<Options>) => setOptions(o => ({...o, ...patch}));
-  const steps = stagesFor(options).length;
+  const steps = stagesFor({...options, copy: !!input?.copy}).length;
   const estimate = input?.estimate?.range_seconds ? roughRange(input.estimate.range_seconds) : '';
   const canStart = !!input && available[input.path] !== false && settings.engine_ready && !busy && !starting;
 
@@ -226,7 +251,7 @@ function NewRun({project, settings, busy, available, onAddInput, onStart}:
       )}
       <div className="start">
         <button className="primary large" disabled={!canStart} onClick={async () => { setStarting(true); try { await onStart(input!, options); } finally { setStarting(false); } }}><Play size={16} />Process</button>
-        <span className="muted">{steps} steps{estimate ? `, usually ${estimate}` : ''}</span>
+        <span className="muted">{steps} steps{estimate ? `, usually ${estimate}` : ''}{input?.copy ? '. The scan is copied to this Mac first.' : onExternalDrive(input?.path ?? '') ? '. Reads from the external drive.' : ''}</span>
         {!settings.engine_ready && <span className="warn-text">The processing engine is not set up. Open Settings.</span>}
         {input && available[input.path] === false && <span className="warn-text">The scan folder is not mounted.</span>}
         {busy && <span className="muted">Another run is in progress.</span>}
@@ -266,7 +291,7 @@ function RunDetail({run, live, project, busy, onCancel, onResume, onOpenViewer, 
       <div className="run-head">
         <div>
           <h2>{when(started ? started / 1000 : null) || run.name}</h2>
-          <span className="muted">{input?.name ?? basename(run.capture)}, {run.options.color ? 'colored' : 'geometry only'}{run.options.color && run.options.mask === 'person' ? ', people removed' : ''}, {run.options.resources === 'throughput' ? 'max' : run.options.resources === 'interactive' ? 'light' : 'balanced'} performance</span>
+          <span className="muted">{input?.name ?? basename(run.capture)}, {run.options.color ? 'colored' : 'geometry only'}{run.options.color && run.options.mask === 'person' ? ', people removed' : ''}, {run.options.resources === 'throughput' ? 'max' : run.options.resources === 'interactive' ? 'light' : 'balanced'} performance{run.options.copy ? ', copied first' : ''}</span>
         </div>
         <div className="row">
           {(status === 'running' || status === 'starting') && <button className="danger" onClick={onCancel}><Square size={13} />Cancel</button>}

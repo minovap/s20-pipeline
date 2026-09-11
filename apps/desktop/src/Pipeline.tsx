@@ -109,7 +109,7 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
                    s.status === 'skipped' ? <Minus size={12} /> : null}
                 </span>
                 <span className="name">{stageLabel(s.id)}
-                  {s.status === 'running' && s.total ? <small>{s.done?.toLocaleString()} of {s.total.toLocaleString()}</small> : null}
+                  {s.status === 'running' && s.total ? <small>{s.unit === 'bytes' ? `${bytes(s.done)} of ${bytes(s.total)}` : `${s.done?.toLocaleString()} of ${s.total.toLocaleString()}`}</small> : null}
                 </span>
                 <time>{time}</time>
                 {onShowLog && (s.status !== 'pending' && s.status !== 'skipped') && (
