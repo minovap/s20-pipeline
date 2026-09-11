@@ -241,3 +241,36 @@ def test_cancel_terminates_worker_process_group():
     except psutil.NoSuchProcess:
         pass
     child.stdout.close()
+
+
+def test_scheduler_runs_color_prep_beside_geometry():
+    from s20_pipeline.runner import blocked, ready
+
+    names = [
+        "decode",
+        "pack",
+        "tracking",
+        "pose_refinement",
+        "registered",
+        "geometry",
+        "photos",
+        "cameras",
+        "masks",
+        "candidates",
+        "global",
+        "local",
+        "blend",
+        "export",
+    ]
+    assert ready(names, set(), set()) == ["decode", "photos"]
+    assert ready(names, {"decode", "photos"}, set()) == ["pack", "masks"]
+    # cameras needs registered poses; with masks done the color lane waits for geometry
+    assert ready(names, {"decode", "photos", "masks"}, {"pack"}) == []
+    assert list(blocked(names, {"decode", "photos", "masks"}, {"pack"})) == [
+        ("cameras", ["registered"])
+    ]
+    done = {"decode", "pack", "tracking", "pose_refinement", "registered", "photos", "masks"}
+    assert ready(names, done, {"geometry"}) == ["cameras"]
+    assert list(blocked(names, done | {"cameras"}, {"geometry"})) == [("candidates", ["geometry"])]
+    # colorize mode has no photo stage, so masks depend on nothing
+    assert ready(["masks", "candidates", "blend", "export"], set(), set()) == ["masks"]

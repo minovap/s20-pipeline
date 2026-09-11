@@ -27,7 +27,8 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
   }, [status]);
 
   const list = useRef<HTMLDivElement>(null);
-  const activeId = stages.find(s => s.status === 'running')?.id ?? null;
+  const runningIds = stages.filter(s => s.status === 'running').map(s => s.id);
+  const activeId = runningIds[0] ?? null;
   const userScrolled = useRef(false);
   // Follow the active step unless the user has scrolled since it changed.
   useEffect(() => {
@@ -47,9 +48,10 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
   const end = finishedAt ?? now;
   const elapsed = startedAt ? (end - startedAt) / 1000 : null;
   const position = activeId ? stages.findIndex(s => s.id === activeId) + 1 : done;
+  const positions = runningIds.map(id => stages.findIndex(s => s.id === id) + 1);
 
   const headline =
-    status === 'running' ? `Step ${position} of ${total}` :
+    status === 'running' ? (positions.length > 1 ? `Steps ${positions.join(' and ')} of ${total}` : `Step ${position} of ${total}`) :
     status === 'starting' ? 'Checking inputs' :
     status === 'completed' ? `${total} steps completed` :
     status === 'failed' ? `Failed at step ${Math.min(position + 1, total)} of ${total}` :
@@ -91,6 +93,7 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
           const live = s.status === 'running' && s.startedAt ? (now - s.startedAt) / 1000 : null;
           const time =
             s.status === 'running' ? duration(live) :
+            s.status === 'waiting' ? `waiting for ${(s.waitingFor ?? []).map(stageLabel).join(', ').toLowerCase()}` :
             s.status === 'cached' ? 'cached' :
             s.status === 'complete' ? duration(s.wall_s) :
             s.status === 'skipped' ? 'skipped' : '';

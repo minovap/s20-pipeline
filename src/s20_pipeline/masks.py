@@ -2,11 +2,27 @@
 
 import json
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from .camera import load_camera_frames
+
+
+@dataclass(frozen=True)
+class MaskInput:
+    name: str
+    image_path: Path
+
+
+def mask_inputs(source, calibration):
+    """Images to mask: either the photo index (a list) or calibrated camera frames."""
+    payload = json.loads(Path(source).read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return [MaskInput(item["camera"], Path(item["image"]).resolve()) for item in payload]
+    return [MaskInput(f.name, f.image_path) for f in load_camera_frames(source, calibration)]
 
 
 def masks(cameras, calibration, dest, device="mps", workers=8, progress=lambda *args: None):
@@ -30,7 +46,9 @@ def masks(cameras, calibration, dest, device="mps", workers=8, progress=lambda *
     sync_wall = 0.0
     preprocess_wall = 0.0
     save_wall = 0.0
-    fs = load_camera_frames(cameras, calibration)
+    fs = mask_inputs(cameras, calibration)
+    if not fs:
+        raise ValueError("No images to mask")
     with torch.inference_mode():
         for start in range(0, len(fs), 4):
             batch = fs[start : start + 4]

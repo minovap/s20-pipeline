@@ -64,7 +64,13 @@ function simulateJob(job: Job) {
     .filter(s => job.exposure !== 'off' || (s !== 'global' && s !== 'local')).filter(s => job.exposure === 'local' || s !== 'local');
   let t = 300;
   const send = (delay: number, payload: Record<string, unknown>) => timers.push(setTimeout(() => emit('pipeline-event', {run_id: job.output, time_unix: Date.now() / 1000, ...payload}), delay));
+  // Color preparation runs beside the geometry lane in the real runner.
+  const side = ['photos', 'masks'].filter(s => stages.includes(s));
+  let ts = 300;
+  for (const stage of side) { send(ts, {event: 'stage_started', stage}); ts += 2200; send(ts, {event: 'stage_completed', stage, wall_s: 2.2}); ts += 50; }
+  if (side.length) send(ts, {event: 'stage_waiting', stage: 'cameras', waiting_for: ['registered']});
   stages.forEach((stage, i) => {
+    if (side.includes(stage)) return;
     const length = 1800 + (i * 977) % 2600;
     if (job.resume && i < 2) { send(t, {event: 'stage_cached', stage}); t += 200; return; }
     send(t, {event: 'stage_started', stage});

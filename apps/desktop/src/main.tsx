@@ -63,6 +63,9 @@ function App() {
       } else if (e.event === 'stage_cached' && e.stage) {
         const id = e.stage;
         update(r => ({...r, status: 'running', order: r.order.includes(id) ? r.order : [...r.order, id], stages: {...r.stages, [id]: {id, status: 'cached'}}}));
+      } else if (e.event === 'stage_waiting' && e.stage) {
+        const id = e.stage;
+        update(r => ({...r, stages: {...r.stages, [id]: {id, status: 'waiting', waitingFor: e.waiting_for ?? []}}}));
       } else if (e.event === 'progress' && e.stage) {
         const id = e.stage;
         update(r => ({...r, stages: {...r.stages, [id]: {...r.stages[id], id, status: 'running', done: e.done, total: e.total, unit: e.unit}}}));

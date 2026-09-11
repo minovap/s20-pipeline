@@ -95,7 +95,9 @@ def execute(stage, job):
     elif stage == "masks":
         from .masks import masks
 
-        masks(cameras, calibration, dest, cfg["mask_device"], cfg["cpu_threads"], progress)
+        # In run mode the photo index is enough, so masks do not wait for poses.
+        source = out / "photos/images.json" if job["mode"] == "run" else cameras
+        masks(source, calibration, dest, cfg["mask_device"], cfg["cpu_threads"], progress)
     elif stage == "candidates":
         from .collect import collect
 
