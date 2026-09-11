@@ -118,3 +118,21 @@ The frozen indoor scan was warmed, then the previous and changed collectors were
 This is a **23.3% wall-time reduction** (`1.303×`) and a **9.7% RSS reduction** (about 271 MB). All three changed observation files passed `cmp` against the frozen golden file. A separate full first-photo diagnostic over all 6,136,485 points found zero differences in projection validity, packed depth keys, exact winners, neighborhood blockers, reliability/surface decisions or final visibility. The lightweight suite passed 42 tests with 8 Metal/native tests skipped in the isolated worktree.
 
 This change does not meet the later fivefold candidate-stage target. Against the 24.390-second previous median, that target requires an end-to-end result at or below 4.878 seconds on the same frozen input. Further work must reduce projection/visibility/ranking traffic rather than treating parallel depth construction alone as the final design.
+
+
+## Deferred final-only photo sampling, 12 September 2026
+
+The CPU collector now postpones RGB decoding, bilinear sampling, gradient calculation and grid-coordinate calculation until the four final photo winners are known. During chronological selection it stores only each accepted winner's exact float32 `u`, `v`, photo ID and score in their eventual canonical record fields. Strict score comparison, first-minimum-slot replacement and the final stable descending sort are unchanged. Mask loading is overlapped with the same photo's projection/depth pass.
+
+This is an **in-place deferred-sampling layout**, not a separate compact 64-byte-per-point allocation: `observations.bin` remains a 128-byte-per-point mapping. Final occupied slots are counted and grouped by photo through a temporary slot index of 4 bytes per occupied slot when `4N` fits `uint32`, with a `uint64` fallback. The writable index is flushed and closed before three finalizer workers consume it through bounded positional reads. Sampling chunks are capped at 32,768 slots. Geometry, normals, the voxel index and last-photo temporaries are released before final materialization. These worker and chunk values are measured bounded defaults, not universal optima.
+
+Three sequential unprofiled runs on the same frozen indoor input were compared with the preceding exact CPU checkpoint:
+
+| Collector | Candidate-stage wall samples | Median wall | Median sampled RSS |
+|---|---|---:|---:|
+| Preceding CPU checkpoint | 18.014 s, 18.712 s, 19.337 s | 18.712 s | 2.537 GB |
+| Deferred final sampling | 17.263 s, 16.958 s, 16.827 s | 16.958 s | 2.548 GB |
+
+The change is **9.37% faster** than the preceding checkpoint (`1.103×`) with an 11 MB (`0.45%`) median RSS increase. All three output files passed byte-for-byte comparison with the frozen golden observations. Combined with the preceding patch, median wall time is **30.5% lower** than the 24.390-second pre-task baseline (`1.438×`), while sampled RSS remains about 260 MB lower.
+
+Profiling counted 59,513,401 accepted chronological insertions but only 23,555,511 final occupied slots, so final-only sampling avoids materializing 60.4% of records that would later be overwritten. Photo progress reaches 100% after selection and before the bounded final sort, grouping and materialization pass; the stage itself is not complete until that pass and the final flush finish.

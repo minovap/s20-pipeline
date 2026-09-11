@@ -88,9 +88,7 @@ def test_compact_index_preserves_ids_across_selection_paths(monkeypatch, kept_ce
     # and restoration of original point order, including the 25% boundary.
     cells = np.repeat(np.arange(8), [1, 7, 2, 10, 3, 5, 8, 4])
     cells = cells[np.random.default_rng(181).permutation(len(cells))]
-    xyz = np.column_stack([cells * 10, np.zeros(len(cells)), np.ones(len(cells))]).astype(
-        "f4"
-    )
+    xyz = np.column_stack([cells * 10, np.zeros(len(cells)), np.ones(len(cells))]).astype("f4")
     index = PhotoPointIndex(xyz, chunk=7)
     assert index.order.dtype == np.dtype("uint32")
     assert index.order.nbytes == 4 * len(xyz)

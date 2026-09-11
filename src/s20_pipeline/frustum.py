@@ -14,6 +14,7 @@ class PhotoPointIndex:
     def __init__(self, xyz, voxel_size=2.0, chunk=262144):
         self.size = voxel_size
         self.count = len(xyz)
+        self.last_selection = None
         lower = np.floor(xyz.min(axis=0).astype(np.float64) / voxel_size)
         upper = np.floor(xyz.max(axis=0).astype(np.float64) / voxel_size)
         shape = tuple(int(value) + 1 for value in upper - lower)
@@ -125,12 +126,24 @@ class PhotoPointIndex:
     def point_ids(self, frame):
         """Return ordered IDs, or None for a dense view's faster contiguous path."""
         if self.order is None:
+            self.last_selection = {
+                "path": "unindexed",
+                "occupied_voxels": 0,
+                "retained_voxels": 0,
+                "selected_points": self.count,
+            }
             return None
         keep = self.visible_voxels(frame)
         selected_count = int(self.counts[keep].sum())
         # A compact indoor cloud often fits almost entirely in the halo. Avoid
         # gathering/copying it when culling would save fewer than 10% of points.
         if selected_count >= 0.9 * self.count:
+            self.last_selection = {
+                "path": "dense",
+                "occupied_voxels": int(len(self.counts)),
+                "retained_voxels": int(np.count_nonzero(keep)),
+                "selected_points": self.count,
+            }
             return None
         if selected_count <= self.count // 4:
             # Sparse views need only their selected IDs, not a full-cloud mask.
@@ -144,7 +157,20 @@ class PhotoPointIndex:
                 cursor += count
             # Every ID is unique; ascending order exactly matches flatnonzero.
             selected.sort()
+            self.last_selection = {
+                "path": "sparse",
+                "occupied_voxels": int(len(self.counts)),
+                "retained_voxels": int(np.count_nonzero(keep)),
+                "selected_points": selected_count,
+            }
             return selected
         selected = np.empty(self.count, dtype=bool)
         selected[self.order] = np.repeat(keep, self.counts)
-        return np.flatnonzero(selected)
+        point_ids = np.flatnonzero(selected)
+        self.last_selection = {
+            "path": "mask",
+            "occupied_voxels": int(len(self.counts)),
+            "retained_voxels": int(np.count_nonzero(keep)),
+            "selected_points": selected_count,
+        }
+        return point_ids

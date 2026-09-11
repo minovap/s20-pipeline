@@ -76,6 +76,87 @@ def test_fresh_observations_are_zero_and_existing_files_are_preserved(tmp_path):
     records._mmap.close()
 
 
+def test_pread_exact_retries_short_reads_and_rejects_truncation(monkeypatch):
+    source = b"candidate-slots"
+    monkeypatch.setattr(
+        module.os,
+        "pread",
+        lambda _descriptor, size, offset: source[offset : offset + min(size, 3)],
+    )
+    assert module._pread_exact(7, len(source), 0) == source
+    with pytest.raises(OSError, match="Unexpected end"):
+        module._pread_exact(7, len(source) + 1, 0)
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_deferred_finalizer_matches_legacy_packing_and_stable_sort(tmp_path, workers):
+    calibration = replace(camera().calibration, width=4, height=4)
+    frames = []
+    images = []
+    rng = np.random.default_rng(238)
+    for photo in range(4):
+        path = tmp_path / f"photo-{photo}.png"
+        image = rng.integers(0, 256, (4, 4, 3), dtype="u1")
+        Image.fromarray(image).save(path)
+        images.append(image)
+        frames.append(replace(camera(), calibration=calibration, image_path=path))
+
+    records = module._empty_observations(tmp_path / "observations.bin", 3, 4)
+    for point, slot, photo, score, u, v in (
+        (0, 0, 1, 0.5, 1.25, 1.5),
+        (0, 1, 0, 0.7, 0.75, 2.1),
+        (0, 2, 2, 0.5, 2.0, 0.25),
+        (1, 0, 2, 0.1, 1.1, 1.2),
+        (1, 1, 0, 0.9, 2.4, 2.3),
+        (1, 2, 1, 0.4, 0.2, 0.6),
+        (1, 3, 2, 0.8, 1.8, 1.7),
+    ):
+        records[point, slot, :2] = (u, v)
+        records[point, slot, 6] = photo
+        records[point, slot, 7] = score
+
+    expected = np.asarray(records).copy()
+    for photo, image in enumerate(images):
+        points, slots = np.nonzero((expected[:, :, 7] > 0) & (expected[:, :, 6] == photo))
+        u = expected[points, slots, 0]
+        v = expected[points, slots, 1]
+        x = u.astype("int32")
+        y = v.astype("int32")
+        p00 = image[y, x].astype("float32")
+        p10 = image[y, x + 1].astype("float32")
+        p01 = image[y + 1, x].astype("float32")
+        p11 = image[y + 1, x + 1].astype("float32")
+        a = (u - x)[:, None]
+        b = (v - y)[:, None]
+        expected[points, slots, :3] = (
+            (1 - a) * (1 - b) * p00 + a * (1 - b) * p10 + (1 - a) * b * p01 + a * b * p11
+        )
+        expected[points, slots, 3] = np.maximum(abs(p10 - p00).max(1), abs(p01 - p00).max(1))
+        expected[points, slots, 4] = np.clip(u / 4 * 8 - 0.5, 0, 7)
+        expected[points, slots, 5] = np.clip(v / 4 * 6 - 0.5, 0, 5)
+    order = np.argsort(-expected[:, :, 7], axis=1, kind="stable")
+    expected = np.take_along_axis(expected, order[:, :, None], axis=1)
+
+    actual, stats = module._finalize_observations(
+        tmp_path, records, frames, chunk=1, grid=(8, 6), workers=workers
+    )
+    np.testing.assert_array_equal(actual, expected)
+    assert stats["final_occupied"] == 7
+    assert stats["represented_photos"] == 3
+    assert not (tmp_path / "ranking-slots.bin").exists()
+
+
+def test_deferred_finalizer_handles_no_candidates(tmp_path):
+    records = module._empty_observations(tmp_path / "observations.bin", 3, 4)
+    actual, stats = module._finalize_observations(
+        tmp_path, records, [camera()], chunk=2, grid=(8, 6), workers=2
+    )
+    assert not actual.any()
+    assert stats["final_occupied"] == 0
+    assert stats["slot_index_bytes"] == 0
+    assert not (tmp_path / "ranking-slots.bin").exists()
+
+
 @pytest.mark.parametrize("selection", ["all", "sparse", "sparse_uint32", "empty"])
 def test_parallel_projection_preserves_reference_keys_and_chunk_boundaries(selection):
     _, xyz, normals = geometry()
