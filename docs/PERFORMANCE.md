@@ -138,3 +138,17 @@ The change is **9.37% faster** than the preceding checkpoint (`1.103×`) with an
 Profiling counted 59,513,401 accepted chronological insertions but only 23,555,511 final occupied slots, so final-only sampling avoids materializing 60.4% of records that would later be overwritten. Photo progress reaches 100% after selection and before the bounded final sort, grouping and materialization pass; the stage itself is not complete until that pass and the final flush finish.
 
 A follow-up visibility cleanup reuses the gathered blocker coordinates for both plane depth and patch distance, and stops gathering projected integer pixels after masking no longer needs them. Three exact runs measured 16.491 s, 16.753 s and 16.724 s (16.724 s median) with 2.525 GB median sampled RSS. That is a further **1.38% wall-time reduction** and about **23 MB lower RSS** than the deferred-sampling checkpoint; all three outputs again matched the frozen golden file byte for byte.
+
+
+## Valid-only projection intermediate, 12 September 2026
+
+The CPU depth pass now retains each original projection chunk as valid point IDs plus exact float32 `u`, `v`, angle and distance arrays. After the unchanged full-photo depth barrier, visibility consumes those chunks directly. This removes the second validity pass over every selected point while preserving projection batch shapes, point order and exact depth contributions. Workers clear their uniquely owned chunk entry as soon as it is consumed.
+
+The representation costs 20 bytes per valid pair instead of 16 bytes per selected pair for the former dense projection. On the frozen scan, 155,575,674 of 380,462,070 selected point-photo pairs were valid, so aggregate retained projection data falls from 6.087 GB to 3.112 GB across the 62 sequential photos. The largest single-photo intermediate was 96.7 MB. Pixel IDs are deliberately recomputed from retained `u/v`; retaining them raised the representation to 24 bytes per valid pair and increased the peak for dense photos.
+
+| Collector | Candidate-stage wall samples | Median wall | Median sampled RSS |
+|---|---|---:|---:|
+| Reused-gather checkpoint | 16.491 s, 16.753 s, 16.724 s | 16.724 s | 2.525 GB |
+| Valid-only projection | 15.869 s, 15.972 s, 15.790 s | 15.869 s | 2.549 GB |
+
+This is another **5.12% wall-time reduction** (`1.054×`). The 24.6 MB (`0.98%`) sampled-RSS increase is within the variability of the final file-backed materialization peak; during the photo loop, sampled RSS peaked between 2.075 and 2.129 GB. All three output files matched the frozen golden observations byte for byte. From the original 24.390-second CPU baseline, the combined exact changes are **34.9% faster** (`1.537×`).

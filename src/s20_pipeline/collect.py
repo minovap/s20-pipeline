@@ -226,14 +226,30 @@ def _depth_worker_count(count, chunk, workers, depth_bytes):
     )
 
 
-def _cpu_projection_depth(xyz, frame, selected, projection, depth_id, chunk, workers, executor):
-    """Project fixed chunks in parallel, then merge exact per-worker depth minima."""
+def _cpu_projection_depth(
+    xyz,
+    frame,
+    selected,
+    projection,
+    depth_id,
+    chunk,
+    workers,
+    executor,
+    projected_chunks=None,
+):
+    """Project fixed chunks in parallel, then merge exact per-worker depth minima.
+
+    When projected_chunks is supplied, retain only valid projection rows and
+    their projection values. This preserves the projection batch shapes while
+    avoiding a second validity scan over every selected point.
+    """
     n = len(xyz)
     count = n if selected is None else len(selected)
     worker_count = _depth_worker_count(count, chunk, workers, depth_id.nbytes)
     cal = frame.calibration
     width = (cal.width + 3) // 4
     sentinel = np.iinfo(np.int64).max
+    id_dtype = "uint32" if n <= np.iinfo(np.uint32).max else "uint64"
 
     def project_stripe(worker):
         local_depth = depth_id if worker == 0 else np.full_like(depth_id, sentinel)
@@ -241,7 +257,8 @@ def _cpu_projection_depth(xyz, frame, selected, projection, depth_id, chunk, wor
             end = min(count, start + chunk)
             point_chunk = slice(start, end) if selected is None else selected[start:end]
             u, v, angle, d = project(xyz[point_chunk], frame)
-            projection[start:end] = np.column_stack([u, v, angle, d])
+            if projection is not None:
+                projection[start:end] = np.column_stack([u, v, angle, d])
             valid = (
                 (d > 0.1)
                 & np.isfinite(u)
@@ -254,6 +271,14 @@ def _cpu_projection_depth(xyz, frame, selected, projection, depth_id, chunk, wor
             )
             ids = np.flatnonzero(valid) + start if selected is None else selected[start:end][valid]
             pix = v[valid].astype("int32") // 4 * width + u[valid].astype("int32") // 4
+            if projected_chunks is not None:
+                projected_chunks[start // chunk] = (
+                    np.ascontiguousarray(ids, dtype=id_dtype),
+                    u[valid],
+                    v[valid],
+                    angle[valid],
+                    d[valid],
+                )
             quant = np.rint(d[valid] * 1e6).astype("int64")
             if len(ids):
                 if int(quant.max()) >= (sentinel - n) // n:
@@ -489,6 +514,7 @@ def collect(
             # Point chunks therefore cannot hide occluders in other chunks.
             selected_ids = None
             metal_result = None
+            projected_chunks = None
             depth_workers = 0
             project_started = perf_counter()
             if metal is not None:
@@ -511,9 +537,17 @@ def collect(
                     )
             else:
                 depth_id = np.full(w * h, sentinel, dtype="int64")
-                projection = np.empty((count, 4), dtype="float32")
+                projected_chunks = [None] * ((count + CHUNK - 1) // CHUNK)
                 depth_workers = _cpu_projection_depth(
-                    xyz, f, selected, projection, depth_id, CHUNK, workers, executor
+                    xyz,
+                    f,
+                    selected,
+                    None,
+                    depth_id,
+                    CHUNK,
+                    workers,
+                    executor,
+                    projected_chunks,
                 )
                 projection_depth_s = perf_counter() - project_started
                 minimum_started = perf_counter()
@@ -541,34 +575,29 @@ def collect(
 
             def color_chunk(start):
                 chunk_started = perf_counter()
-                end = min(count, start + CHUNK)
-                u, v, angle, d = projection[start:end].T
-                valid = (
-                    (metal_result.flags[start:end] & VALID) != 0
-                    if metal_result is not None
-                    else (
-                        (d > 0.1)
-                        & np.isfinite(u)
-                        & np.isfinite(v)
-                        & (u >= 0)
-                        & (v >= 0)
-                        & (u < cal.width - 1)
-                        & (v < cal.height - 1)
-                        & (angle < np.deg2rad(cal.max_incident_angle_deg))
+                if metal_result is not None:
+                    end = min(count, start + CHUNK)
+                    u, v, angle, d = projection[start:end].T
+                    valid = (metal_result.flags[start:end] & VALID) != 0
+                    ids = (
+                        np.flatnonzero(valid) + start
+                        if selected is None
+                        else selected[start:end][valid]
                     )
-                )
-                ids = (
-                    np.flatnonzero(valid) + start
-                    if selected is None
-                    else selected[start:end][valid]
-                )
-                positions = np.flatnonzero(valid) + start
-                valid_count = int(np.count_nonzero(valid)) if profile else 0
-                u = u[valid]
-                v = v[valid]
-                d = d[valid]
-                angle = angle[valid]
-                pix = v.astype("int32") // 4 * w + u.astype("int32") // 4
+                    positions = np.flatnonzero(valid) + start
+                    valid_count = int(np.count_nonzero(valid)) if profile else 0
+                    u = u[valid]
+                    v = v[valid]
+                    d = d[valid]
+                    angle = angle[valid]
+                    pix = v.astype("int32") // 4 * w + u.astype("int32") // 4
+                else:
+                    projected = projected_chunks[start]
+                    projected_chunks[start] = None
+                    ids, u, v, angle, d = projected
+                    positions = None
+                    valid_count = len(ids) if profile else 0
+                    pix = v.astype("int32") // 4 * w + u.astype("int32") // 4
                 decision_started = perf_counter()
                 if metal_result is None:
                     blocker_keys = filled[pix]
@@ -662,15 +691,33 @@ def collect(
                     "pack_s": pack_s,
                 }
 
+            valid_projection_pairs = (
+                0 if projected_chunks is None else sum(len(part[0]) for part in projected_chunks)
+            )
+            projection_intermediate_bytes = (
+                0
+                if projected_chunks is None
+                else sum(array.nbytes for part in projected_chunks for array in part)
+            )
             color_started = perf_counter()
-            totals = list(executor.map(color_chunk, range(0, count, CHUNK)))
+            color_work = (
+                range(0, count, CHUNK)
+                if metal_result is not None
+                else range(len(projected_chunks))
+            )
+            totals = list(executor.map(color_chunk, color_work))
             color_wall_s = perf_counter() - color_started
+            # The last photo's compact projection would otherwise remain live
+            # through final sorting and image materialization.
+            projected_chunks = None
             inserted = sum(t["inserted"] for t in totals)
             rejected = sum(t["surface_patch_rejections"] for t in totals)
             rows.append(
                 {
                     "image": str(f.image_path),
                     "projected_points": count,
+                    "valid_projection_pairs": valid_projection_pairs,
+                    "projection_intermediate_bytes": projection_intermediate_bytes,
                     "cpu_depth_workers": depth_workers,
                     "cpu_depth_buffer_bytes": max(1, depth_workers) * depth_id.nbytes
                     if depth_id is not None
@@ -691,7 +738,9 @@ def collect(
             if profile:
                 selection = getattr(point_index, "last_selection", None) or {}
                 selected_bytes = 0 if selected is None else selected.nbytes
-                photo_storage_bytes = projection.nbytes + selected_bytes
+                photo_storage_bytes = (
+                    projection.nbytes if projection is not None else projection_intermediate_bytes
+                ) + selected_bytes
                 if depth_id is not None:
                     photo_storage_bytes += depth_id.nbytes + filled.nbytes
                 elif metal_result is not None:
@@ -749,7 +798,8 @@ def collect(
     }
     voxel_order = None
     color_chunk = None
-    projection = selected = selected_ids = depth_id = filled = mask = metal_result = None
+    projection = projected_chunks = selected = selected_ids = depth_id = filled = None
+    mask = metal_result = None
     totals = image_future = None
     xyz = normals = all_point_ids = None
     del point_index, metal

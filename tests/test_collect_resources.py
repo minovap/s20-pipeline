@@ -173,9 +173,18 @@ def test_parallel_projection_preserves_reference_keys_and_chunk_boundaries(selec
     for workers in (1, 4):
         projection = np.empty((count, 4), dtype="f4")
         depth = np.full(16 * 12, np.iinfo(np.int64).max, dtype="i8")
+        projected_chunks = [None] * ((count + 100) // 101)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             active = module._cpu_projection_depth(
-                xyz, frame, selected, projection, depth, 101, workers, executor
+                xyz,
+                frame,
+                selected,
+                projection,
+                depth,
+                101,
+                workers,
+                executor,
+                projected_chunks,
             )
         assert active == (0 if count == 0 else workers)
         np.testing.assert_array_equal(projection, reference[0])
@@ -185,6 +194,28 @@ def test_parallel_projection_preserves_reference_keys_and_chunk_boundaries(selec
         np.testing.assert_array_equal(depth[pixels], reference[2][valid])
         filled = module.minimum_depth_keys(depth.reshape(12, 16)).ravel()
         np.testing.assert_array_equal(filled[pixels], reference[3][valid])
+        compact_ids = (
+            np.concatenate([part[0] for part in projected_chunks])
+            if projected_chunks
+            else np.empty(0, dtype="uint32")
+        )
+        compact_projection = (
+            np.column_stack(
+                [
+                    np.concatenate([part[field] for part in projected_chunks])
+                    for field in range(1, 5)
+                ]
+            )
+            if projected_chunks
+            else np.empty((0, 4), dtype="float32")
+        )
+        expected_ids = (
+            np.arange(len(xyz), dtype="uint32")
+            if selected is None
+            else np.asarray(selected, dtype="uint32")
+        )
+        np.testing.assert_array_equal(compact_ids, expected_ids[valid])
+        np.testing.assert_array_equal(compact_projection, reference[0][valid])
         outputs.append((projection, depth))
     for serial, parallel in zip(outputs[0], outputs[1], strict=True):
         np.testing.assert_array_equal(serial, parallel)
@@ -228,6 +259,7 @@ def test_collector_serial_parallel_observations_and_unwritten_zeros(tmp_path, mo
             workers=workers,
             chunk=101,
             progress=lambda *args: progress.append(args),
+            profile=True,
         )
         assert progress == [(1, 1)]
         records = (out / "candidates/observations.bin").read_bytes()
@@ -237,6 +269,9 @@ def test_collector_serial_parallel_observations_and_unwritten_zeros(tmp_path, mo
             json.loads((out / "candidates/photo-progress.jsonl").read_text()) == meta["images"][0]
         )
         assert meta["images"][0]["cpu_depth_workers"] <= workers
+        assert meta["images"][0]["valid_projection_pairs"] <= len(points)
+        assert meta["images"][0]["projection_intermediate_bytes"] >= 0
+        assert meta["images"][0]["profile"]["photo_storage_bytes"] >= 0
         values = np.frombuffer(records, dtype="f4").reshape(-1, 4, 8)
         assert not values[:, 1:, :].any()
         if view == "normal":
