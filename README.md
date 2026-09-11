@@ -69,12 +69,17 @@ s20 colorize --geometry /data/filtered.ply \
 
 Omit `--masks` to generate masks, or select `--mask off`. PLY requires XYZ and oriented normal fields. Image identities, transforms and calibrated dimensions are validated. The exposure grid is intentionally fixed at 8×6 and four candidate views; image count is dynamic.
 
+## Desktop app
+
+`apps/desktop/` holds S20 Studio, a Tauri 2 + React app around this pipeline: projects that collect raw scan folders, build-pipeline style progress for each run, and a point cloud viewer with axis-locked views, orientation calibration, box slicing and LAS export of slices. See [apps/desktop/README.md](apps/desktop/README.md).
+
 ## Repository layout
 
 - `src/s20_pipeline/`: import, configuration, stage orchestration, projection, exposure, export and telemetry.
 - `native/`: C++ tracking/pose correction, Objective-C++ Metal hosts and Metal kernels.
 - `tests/`: correctness and failure-path tests; GPU parity runs when native binaries are built.
 - `tools/`: full-cloud golden comparison and repository checks.
+- `apps/desktop/`: the S20 Studio desktop app.
 - `docs/`: desktop app plan, event contract, performance model, provenance and validation.
 - `licenses/`: retained third-party license notices.
 
