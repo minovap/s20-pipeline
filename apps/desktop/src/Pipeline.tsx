@@ -57,6 +57,7 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
     status === 'interrupted' ? `Interrupted after ${done} of ${total} steps` : '';
 
   const [openLog, setOpenLog] = useState<{stage: string; text: string} | null>(null);
+  const [openInfo, setOpenInfo] = useState<string | null>(null);
   async function toggleLog(stage: string) {
     if (openLog?.stage === stage) { setOpenLog(null); return; }
     if (!onShowLog) return;
@@ -101,7 +102,9 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
                   <time>{groupTime(group) > 0 ? duration(groupTime(group)) : ''}</time>
                 </div>
               )}
-              <div className={`step ${s.status}${header ? ' first' : ''}${last ? ' last' : ''}`} data-stage={s.id}>
+              <div className={`step ${s.status}${header ? ' first' : ''}${last ? ' last' : ''}${openInfo === s.id ? ' open' : ''}`} data-stage={s.id}
+                role="button" tabIndex={0} aria-expanded={openInfo === s.id} onClick={() => setOpenInfo(o => (o === s.id ? null : s.id))}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpenInfo(o => (o === s.id ? null : s.id)); } }}>
                 <span className="mark">
                   {s.status === 'running' ? <Spinner /> :
                    s.status === 'complete' || s.status === 'cached' ? <Check size={13} strokeWidth={2.5} /> :
@@ -113,12 +116,13 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
                 </span>
                 <time>{time}</time>
                 {onShowLog && (s.status !== 'pending' && s.status !== 'skipped') && (
-                  <button className="icon log" title="Show log" aria-expanded={openLog?.stage === s.id} onClick={() => toggleLog(s.id)}>
+                  <button className="icon log" title="Show log" aria-expanded={openLog?.stage === s.id} onClick={e => { e.stopPropagation(); toggleLog(s.id); }}>
                     {openLog?.stage === s.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   </button>
                 )}
                 {s.status === 'running' && s.total ? <progress max={s.total} value={s.done ?? 0} /> : null}
               </div>
+              {openInfo === s.id && <div className="step-info">{STAGES.find(x => x.id === s.id)?.about ?? ''}</div>}
               {failed && error && s.id === stages.find(x => x.status === 'failed' || x.status === 'cancelled' || x.status === 'incomplete')?.id && (
                 <div className="step-error">{error}</div>
               )}

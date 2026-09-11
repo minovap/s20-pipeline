@@ -56,22 +56,22 @@ export type Cloud = {info: Preview; data: Float32Array};
 
 // Stage order matches s20_pipeline.runner.stage_names. Groups give the long
 // list a shape; labels say what the step produces in plain words.
-export const STAGES: {id: string; label: string; group: 'Prepare' | 'Geometry' | 'Color'}[] = [
-  {id: 'copy', label: 'Copy scan to this Mac', group: 'Prepare'},
-  {id: 'decode', label: 'Decode LiDAR and IMU', group: 'Geometry'},
-  {id: 'pack', label: 'Validate and pack frames', group: 'Geometry'},
-  {id: 'tracking', label: 'Track motion and deskew', group: 'Geometry'},
-  {id: 'pose_refinement', label: 'Refine poses', group: 'Geometry'},
-  {id: 'registered', label: 'Register scan frames', group: 'Geometry'},
-  {id: 'geometry', label: 'Filter geometry', group: 'Geometry'},
-  {id: 'photos', label: 'Extract photos', group: 'Color'},
-  {id: 'cameras', label: 'Calibrate cameras', group: 'Color'},
-  {id: 'masks', label: 'Mask people', group: 'Color'},
-  {id: 'candidates', label: 'Match photos to points', group: 'Color'},
-  {id: 'global', label: 'Balance exposure between photos', group: 'Color'},
-  {id: 'local', label: 'Balance exposure within photos', group: 'Color'},
-  {id: 'blend', label: 'Blend colors', group: 'Color'},
-  {id: 'export', label: 'Write point cloud', group: 'Color'},
+export const STAGES: {id: string; label: string; group: 'Prepare' | 'Geometry' | 'Color'; about: string}[] = [
+  {id: 'copy', label: 'Copy scan to this Mac', group: 'Prepare', about: 'Copies the raw scan folder from the external drive to this Mac so every later step reads from the fast internal disk. The copy is removed when the run succeeds.'},
+  {id: 'decode', label: 'Decode LiDAR and IMU', group: 'Geometry', about: 'Reads the raw recording and unpacks the LiDAR returns and the motion sensor samples into working files.'},
+  {id: 'pack', label: 'Validate and pack frames', group: 'Geometry', about: 'Checks timestamps and calibration, then packs the frames into the compact format the native tracker reads.'},
+  {id: 'tracking', label: 'Track motion and deskew', group: 'Geometry', about: 'Follows how the scanner moved, frame by frame, and straightens each sweep. The LiDAR keeps moving while it records, so without this every sweep would be smeared.'},
+  {id: 'pose_refinement', label: 'Refine poses', group: 'Geometry', about: 'A second pass over the path that tightens the scanner positions wherever the same surface was seen more than once.'},
+  {id: 'registered', label: 'Register scan frames', group: 'Geometry', about: 'Places every sweep into one shared coordinate frame using the final positions.'},
+  {id: 'geometry', label: 'Filter geometry', group: 'Geometry', about: 'Merges the sweeps into one cloud on the GPU, removes stray points and estimates which way each surface faces.'},
+  {id: 'photos', label: 'Extract photos', group: 'Color', about: 'Pulls the camera photos out of the recording as JPEG files.'},
+  {id: 'cameras', label: 'Calibrate cameras', group: 'Color', about: 'Works out where each photo was taken by matching its timestamp to the scanner path and the camera calibration.'},
+  {id: 'masks', label: 'Mask people', group: 'Color', about: 'Finds people in the photos so they do not leave their colors on the cloud.'},
+  {id: 'candidates', label: 'Match photos to points', group: 'Color', about: 'For every point, picks the photos that actually see it, taking into account what is hidden behind other surfaces. Usually the longest step.'},
+  {id: 'global', label: 'Balance exposure between photos', group: 'Color', about: 'Evens out brightness differences between photos so seams do not show where they meet.'},
+  {id: 'local', label: 'Balance exposure within photos', group: 'Color', about: 'Evens out lighting differences inside each photo, such as sun and shade, before blending.'},
+  {id: 'blend', label: 'Blend colors', group: 'Color', about: 'Combines the chosen photos into one color for every point.'},
+  {id: 'export', label: 'Write point cloud', group: 'Color', about: 'Writes the finished colored point cloud as a LAS file in the run folder.'},
 ];
 export const stageLabel = (id: string) => STAGES.find(s => s.id === id)?.label ?? id;
 
