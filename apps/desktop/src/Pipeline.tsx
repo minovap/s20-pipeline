@@ -60,6 +60,8 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
 
   const [openLog, setOpenLog] = useState<{stage: string; text: string} | null>(null);
   const [openInfo, setOpenInfo] = useState<string | null>(null);
+  // The running step's note folds out on its own; a click still toggles any step.
+  useEffect(() => { if (activeId) setOpenInfo(activeId); }, [activeId]);
   async function toggleLog(stage: string) {
     if (openLog?.stage === stage) { setOpenLog(null); return; }
     if (!onShowLog) return;

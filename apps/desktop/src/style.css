@@ -193,7 +193,7 @@ input[type=checkbox], input[type=radio] { accent-color: var(--accent); width: 15
 .step.running:hover { background: linear-gradient(90deg, #2f3026, var(--raised)); }
 .step-info, .step-error, pre.log { position: relative; }
 .step-info::before, .step-error:not(.top)::before, pre.log::before { content: ""; position: absolute; left: -23px; top: -12px; bottom: -12px; width: 1.5px; background: var(--line); }
-.step-info { margin: 0 16px 6px 48px; padding: 2px 0 6px; color: var(--accent); font-size: 12px; line-height: 1.5; max-width: 60ch; }
+.step-info { margin: 0 16px 6px 48px; padding: 2px 0 6px; color: var(--amber); font-size: 12px; line-height: 1.5; max-width: 60ch; }
 .step-error.top { margin: 12px 16px 0; }
 .resume-memory { margin: 0 4px 0 0; }
 .resume-memory input { width: 64px; padding: 5px 6px; }
