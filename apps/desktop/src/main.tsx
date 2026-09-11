@@ -1,78 +1,177 @@
-import React,{useEffect,useRef,useState} from 'react';
+// App root: settings, screen routing and the single live processing run.
+// Pipeline events are subscribed once here so a run keeps updating while the
+// user is on another screen.
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {invoke,isTauri} from '@tauri-apps/api/core';
-import {listen} from '@tauri-apps/api/event';
-import {open} from '@tauri-apps/plugin-dialog';
-import {Box,FolderOpen,Play,Square,Settings2,Check,ChevronRight,Loader2,Cpu,MemoryStick,ScanLine,Image,Clock3,ArrowUpRight,AlertCircle} from 'lucide-react';
-import {CloudView} from './CloudView';
-import {bytes,seconds,stagesFor} from './types';
-import type {Cloud,Hardware,Inspection,Job,PipelineEvent,Preview} from './types';
+import {api, errorText, inTauri, listen, mock, pickFolder} from './api';
+import {Projects} from './Projects';
+import {ProjectScreen} from './Project';
+import {Viewer} from './viewer/Viewer';
+import {ErrorBar, Modal} from './ui';
+import {runFolderName} from './format';
+import {stagesFor} from './types';
+import type {Input, Job, Options, PipelineEvent, Project, Run, RunStatus, Settings, StageState} from './types';
 import './style.css';
 
-type Stage={status:string;done?:number;total?:number;wall?:number};
-function App(){
- const [config,setConfig]=useState<{root:string;ready:boolean}|null>(null),[settings,setSettings]=useState(false);
- const [capturePath,setCapturePath]=useState(localStorage.getItem('capture')??''),[outputParent,setOutputParent]=useState(localStorage.getItem('outputParent')??'');
- const [inspection,setInspection]=useState<Inspection|null>(null),[host,setHost]=useState<Hardware|null>(null),[inspecting,setInspecting]=useState(false);
- const [options,setOptions]=useState({resources:'balanced',memory_gb:16,color:true,mask:'person',exposure:'local',pose_refinement:true});
- const [busy,setBusy]=useState(false),[status,setStatus]=useState('Ready'),[error,setError]=useState(''),[logs,setLogs]=useState<string[]>([]),[showLogs,setShowLogs]=useState(false);
- const [stages,setStages]=useState<Record<string,Stage>>({}),[active,setActive]=useState(''),[sample,setSample]=useState<PipelineEvent|null>(null),[gpu,setGpu]=useState<number|null>(null);
- const [clouds,setClouds]=useState<Cloud[]>([]),[previewBusy,setPreviewBusy]=useState(false),[budget,setBudget]=useState(1000000),[elapsed,setElapsed]=useState(0);
- const [lastJob,setLastJob]=useState<Job|null>(()=>{try{return JSON.parse(localStorage.getItem('lastJob')??'null')}catch{return null}});
- const running=useRef<Job|null>(null),started=useRef(0),loadVersion=useRef([0,0]),previewPending=useRef(0);
- async function loadCloud(source:string,index=0){const version=++loadVersion.current[index];previewPending.current++;setPreviewBusy(true);try{const info=await invoke<Preview>('load_preview',{source,budget});const raw=await invoke<ArrayBuffer>('read_preview',{key:info.key});if(raw.byteLength!==info.bytes)throw Error('Incomplete preview data');if(version!==loadVersion.current[index])return;const cloud={info,data:new Float32Array(raw)};setClouds(current=>index===0?[cloud,...current.slice(1)]:[...current.slice(0,1),cloud]);}catch(e){setError(String(e))}finally{previewPending.current--;setPreviewBusy(previewPending.current>0)}}
- const loadRef=useRef(loadCloud);loadRef.current=loadCloud;
- useEffect(()=>{clouds.forEach((c,i)=>{void loadRef.current(c.info.source,i)});},[budget]);
- useEffect(()=>{
-  if(!isTauri())return;let disposed=false;const unsubscribe:(()=>void)[]=[];
-  invoke<{root:string;ready:boolean}>('configuration').then(c=>{setConfig(c);if(c.ready){invoke<Hardware>('hardware').then(setHost).catch(e=>setError(String(e)));try{const paths=JSON.parse(localStorage.getItem('selectedCloudPaths')??'[]') as string[];paths.slice(0,2).forEach((path,i)=>void loadRef.current(path,i));}catch{}}}).catch(e=>setError(String(e)));
-  const sub=<T,>(name:string,fn:(data:T)=>void)=>{listen<T>(name,e=>{if(!disposed)fn(e.payload)}).then(off=>disposed?off():unsubscribe.push(off));};
-  sub<PipelineEvent>('pipeline-event',e=>{if(e.run_id!==running.current?.output)return;
-   if(e.event==='stage_started'){setActive(e.stage!);setStatus('Processing');setStages(s=>({...s,[e.stage!]:{status:'running'}}));}
-   if(e.event==='progress')setStages(s=>({...s,[e.stage!]:{...s[e.stage!],status:'running',done:e.done,total:e.total}}));
-   if(e.event==='stage_completed'||e.event==='stage_cached'){setStages(s=>({...s,[e.stage!]:{status:e.event==='stage_cached'?'cached':'complete',wall:e.wall_s}}));if(e.metal)setGpu(e.metal.gpu_command_s);}
-   if(e.event==='resources')setSample(e);
-   if(e.event==='failed'||e.event==='cancelled'){if(e.stage)setStages(s=>({...s,[e.stage!]:{...s[e.stage!],status:e.event}}));setStatus(e.event==='failed'?'Failed':'Cancelled');if(e.message)setError(e.message);}
-   if(e.event==='completed')setStatus('Complete');
+export type LiveRun = {
+  project: string; job: Job; status: RunStatus; order: string[]; stages: Record<string, StageState>;
+  startedAt: number; finishedAt: number | null; error: string | null; cpu: number | null; memory: number | null; logs: string[];
+};
+type Screen = {kind: 'projects'} | {kind: 'project'; path: string} | {kind: 'viewer'; path: string; focus?: string};
+
+function App() {
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [screen, setScreen] = useState<Screen>(() => {
+    if (mock) {
+      const s = new URLSearchParams(location.search).get('screen');
+      const path = '/Users/demo/Documents/S20 Projects/Garden';
+      return s === 'viewer' ? {kind: 'viewer', path} : s === 'project' || s === 'running' ? {kind: 'project', path} : {kind: 'projects'};
+    }
+    const last = localStorage.getItem('lastProject');
+    return last ? {kind: 'project', path: last} : {kind: 'projects'};
   });
-  sub<{run_id:string;message:string}>('job-log',e=>{if(e.run_id===running.current?.output){setLogs(l=>[...l.slice(-79),e.message]);}});
-  sub<{run_id:string;code:number}>('job-exit',e=>{if(e.run_id!==running.current?.output)return;const job=running.current;setBusy(false);setActive('');if(e.code!==0&&e.code!==130)setError(current=>current||'Processing failed. Open Logs for details.');setStatus(e.code===0?'Complete':e.code===130?'Cancelled':'Failed');if(e.code===0&&job)void loadRef.current(job.output+(job.color?'/export/colorized.las':'/geometry/filtered.ply'));});
-  sub<string>('close-blocked',setError);
-  return()=>{disposed=true;unsubscribe.forEach(off=>off());};
- },[]);
- useEffect(()=>{if(!busy)return;const timer=setInterval(()=>setElapsed((Date.now()-started.current)/1000),500);return()=>clearInterval(timer)},[busy]);
- async function inspect(path=capturePath){if(!path)return;setInspecting(true);setInspection(null);setError('');try{const value=await invoke<Inspection>('inspect_capture',{path});setInspection(value);setHost(value.hardware);setCapturePath(value.capture.capture);localStorage.setItem('capture',value.capture.capture);}catch(e){setError(String(e));}finally{setInspecting(false)}}
- async function chooseCapture(){const p=await open({directory:true,multiple:false,title:'Open raw S20 capture folder'});if(typeof p==='string'){setCapturePath(p);await inspect(p)}}
- async function chooseOutput(){const p=await open({directory:true,multiple:false,title:'Choose parent folder for new processing runs'});if(typeof p==='string'){setOutputParent(p);localStorage.setItem('outputParent',p)}}
- async function chooseCloud(index:number){const p=await open({multiple:false,title:index?'Open comparison reference':'Open point cloud',filters:[{name:'Point cloud',extensions:['las','ply']}]});if(typeof p==='string')await loadCloud(p,index)}
- async function start(resume=false){if(!inspection&&!resume)return;setError('');setLogs([]);setStages({});setSample(null);setGpu(null);setElapsed(0);setStatus(resume?'Verifying resume':'Checking inputs');
-  const name=(inspection?.capture.capture.split('/').pop()??'capture').replace(/[^\w-]/g,'-');
-  const job:Job=resume&&lastJob?{...lastJob,resume:true}:{...options,capture:inspection!.capture.capture,output:outputParent.replace(/\/$/,'')+'/'+name+'-'+new Date().toISOString().replace(/[:.]/g,'-'),resume:false};
-  running.current=job;setLastJob(job);localStorage.setItem('lastJob',JSON.stringify(job));started.current=Date.now();setBusy(true);
-  try{await invoke('start_job',{options:job});}catch(e){setError(String(e));setBusy(false);setStatus('Failed')}
- }
- async function configure(){const p=await open({directory:true,title:'Select installed s20-pipeline repository'});if(typeof p==='string'){try{await invoke('configure',{path:p});setConfig(await invoke('configuration'));setHost(await invoke('hardware'));setSettings(false)}catch(e){setError(String(e))}}}
- const list=stagesFor(busy&&running.current?running.current:options),completed=list.filter(([id])=>['complete','cached'].includes(stages[id]?.status)).length;
- useEffect(()=>{if(clouds.length)localStorage.setItem('selectedCloudPaths',JSON.stringify(clouds.map(c=>c.info.source)));},[clouds]);
- const capture=inspection?.capture,estimate=inspection?.estimate;
- return <div className="app-shell"><header className="app-header"><div className="brand"><span className="brand-icon"><Box size={23}/></span><div>S20 <b>Studio</b><small>NATIVE RECONSTRUCTION</small></div></div><div className="header-right"><span className="engine-status"><i className={config?.ready?'connected':''}/>{isTauri()?(config?.ready?'Local engine ready':'Connect local engine'):'Desktop preview · engine disconnected'}</span><button className="secondary" onClick={()=>setSettings(!settings)}><Settings2 size={15}/>Engine</button></div></header>
- {settings&&<div className="settings-panel"><strong>Processing engine</strong><code>{config?.root??'No engine selected'}</code><p>This development app uses the installed pipeline checkout and its native binaries.</p><button className="secondary" onClick={configure} disabled={busy}>Choose pipeline folder</button></div>}
- <div className="body"><aside className="sidebar"><div className="sidebar-options"><div className="section-eyebrow">01 / SOURCE</div><h2>Open a capture</h2><p className="muted">Read raw footage directly from the camera folder or SD card.</p><button className="folder-button" onClick={chooseCapture} disabled={!config?.ready||busy||inspecting}><FolderOpen size={21}/><div><strong>{capture?capture.capture.split('/').pop():'Choose raw capture'}</strong><small>{capture?'Change source folder':'S20 folder containing all_*.bag'}</small></div><ChevronRight size={17}/></button>
- <details className="path-details"><summary>Enter a folder path</summary><input aria-label="Raw capture folder" placeholder="/Volumes/SD_CARD/Test" value={capturePath} disabled={busy} onChange={e=>{setCapturePath(e.target.value);setInspection(null)}}/><button className="secondary" disabled={!config?.ready||!capturePath||busy||inspecting} onClick={()=>inspect()}>Inspect folder</button></details>
- <div className="sidebar-rule"/><div className="section-eyebrow">02 / OUTPUT</div><h2>Processing options</h2><label className="field">Output<button className="path-button" title={outputParent} onClick={chooseOutput} disabled={busy||!config?.ready}><FolderOpen size={14}/>{outputParent?outputParent.split('/').pop():'Choose output location'}</button></label><small className="hint">Each run gets its own folder. Source files stay read-only.</small>
- <label className="field">Result<select disabled={busy} value={options.color?'color':'geometry'} onChange={e=>setOptions(o=>({...o,color:e.target.value==='color'}))}><option value="color">Geometry + photo color</option><option value="geometry">Geometry only</option></select></label>
- <label className="field">Exposure correction<select disabled={busy||!options.color} value={options.exposure} onChange={e=>setOptions(o=>({...o,exposure:e.target.value}))}><option value="local">Local · recommended</option><option value="global">Global per photo</option><option value="off">Off</option></select></label>
- <label className="toggle"><span>Exclude people<small>MPS segmentation masks</small></span><input type="checkbox" checked={options.mask==='person'} disabled={busy||!options.color} onChange={e=>setOptions(o=>({...o,mask:e.target.checked?'person':'off'}))}/></label><label className="toggle"><span>Refine poses<small>Native surface consistency</small></span><input type="checkbox" checked={options.pose_refinement} disabled={busy} onChange={e=>setOptions(o=>({...o,pose_refinement:e.target.checked}))}/></label>
- <div className="sidebar-rule"/><div className="section-eyebrow">03 / RESOURCES</div><div className="resource-presets">{['interactive','balanced','throughput'].map(p=><button key={p} className={options.resources===p?'selected':''} disabled={busy} onClick={()=>setOptions(o=>({...o,resources:p}))}>{p==='throughput'?'Max':p[0].toUpperCase()+p.slice(1)}</button>)}</div><p className="hint">{options.resources==='throughput'?'Use available CPU capacity and up to 8 color workers. GPU dispatch stays workload-driven.':options.resources==='interactive'?'Limit CPU work to leave room for other apps.':'Conservative CPU workers with room for the desktop.'}</p><label className="field inline">Memory ceiling <span><input type="number" aria-label="Memory limit GB" value={options.memory_gb} min={1} max={1024} disabled={busy} onChange={e=>setOptions(o=>({...o,memory_gb:+e.target.value}))}/> GB</span></label>
- </div><div className="start-area"><div className="estimate"><Clock3 size={16}/><span>Estimated processing<strong>{estimate?.range_seconds?`${seconds(estimate.range_seconds[0])} – ${seconds(estimate.range_seconds[1])}`:inspection?'Uncalibrated on this Mac':'Inspect a capture first'}</strong></span></div><small className="hint">{estimate?'Low confidence · excludes uncalibrated import I/O. Refines with future local measurements.':'Based on capture size, photo count and this computer.'}</small>{busy?<button className="cancel" onClick={()=>invoke('cancel_job').catch(e=>setError(String(e)))}><Square size={15}/>Cancel processing</button>:<button className="primary" disabled={!inspection||!outputParent||!config?.ready||inspecting} onClick={()=>start()}><Play size={16}/>Start full pipeline</button>}{!busy&&lastJob&&status!=='Complete'&&<button className="text-button" onClick={()=>start(true)} disabled={!config?.ready}>Resume last run</button>}</div></aside>
- <main><div className="workspace-heading"><div><div className="section-eyebrow">LOCAL WORKSPACE</div><h1>{capture?capture.capture.split('/').pop():'Reconstruction'}</h1><p>{capture?`${capture.device.device_model} · ${capture.device.lidar_model} · source files read-only`:'From raw camera capture to a colored point cloud.'}</p></div><span className={'status-pill '+(busy?'active':'')}>{busy&&<Loader2 className="spin" size={13}/>} {inspecting?'Inspecting capture':status}</span></div>
- {error&&<div className="error" role="alert"><AlertCircle size={17}/><span>{error}</span><button onClick={()=>setError('')} aria-label="Dismiss error">×</button></div>}
- <section className="capture-stats"><Stat icon={<Clock3/>} label="Capture duration" value={capture?seconds(capture.bag_duration_s):'—'} detail={capture?`${capture.device.work_duration}s device metadata`:'Bag timestamp span'}/><Stat icon={<ScanLine/>} label="LiDAR frames" value={capture?.lidar_frames.toLocaleString()??'—'} detail={capture?`${capture.imu_samples.toLocaleString()} IMU samples`:'Returns counted during decode'}/><Stat icon={<Image/>} label="Camera photos" value={capture?.photos.toString()??'—'} detail={capture?`${Object.values(capture.cameras)[0].width} × ${Object.values(capture.cameras)[0].height} per image`:'Left and right camera'}/><Stat icon={<FolderOpen/>} label="Raw footage" value={bytes(capture?.bag_bytes)} detail="Calibration read from capture"/></section>
- <div className="preview-heading"><h2>Inspect & compare</h2><div><select aria-label="Preview point budget" value={budget} disabled={previewBusy} onChange={e=>setBudget(+e.target.value)}><option value={250000}>250k points</option><option value={1000000}>1M points</option><option value={2000000}>2M points</option></select><button className="secondary" onClick={()=>chooseCloud(0)} disabled={!config?.ready||previewBusy}><FolderOpen size={14}/>Open cloud</button><button className="secondary" onClick={()=>chooseCloud(1)} disabled={!clouds.length||previewBusy}>+ Reference</button></div></div>
- {previewBusy&&<div className="preview-loading" role="status"><Loader2 size={13} className="spin"/>Preparing bounded display sample…</div>}<CloudView clouds={clouds} busy={busy}/>
- <section className="processing"><div className="section-head"><div><h2>Processing steps</h2><span>{busy?`${completed} of ${list.length} complete · ${seconds(elapsed)} elapsed`:status==='Complete'?`${completed} stages complete`:status==='Cancelled'?`${completed} stages saved · ready to resume`:'Progress appears here for every stage'}</span></div><button className="text-button" onClick={()=>setShowLogs(!showLogs)}>Logs <ArrowUpRight size={13}/></button></div><div className="stage-grid">{list.map(([id,label],i)=>{const s=stages[id];return <div className={`stage ${s?.status??''}`} key={id}><span className="stage-icon">{s?.status==='running'?<Loader2 className="spin" size={14}/>:s?.status==='complete'||s?.status==='cached'?<Check size={13}/>:String(i+1).padStart(2,'0')}</span><div>{label}<small>{s?.status==='running'?(s.total?`${s.done} / ${s.total}`:'Processing…'):s?.status==='cached'?'Verified cache':s?.status==='cancelled'?'Cancelled':s?.status==='failed'?'Failed':s?.wall?seconds(s.wall):'Pending'}</small></div>{id===active&&s?.total&&<progress max={s.total} value={s.done}/>}</div>})}</div>{showLogs&&<pre className="logs">{logs.length?logs.join('\n'):lastJob?`Run folder: ${lastJob.output}\nDetailed stage logs are stored in logs/.`:'No active job. Each run saves full stage logs in its output folder.'}</pre>}</section>
- <section className="machine"><div className="machine-title"><Cpu size={18}/><div>{host?.cpu_model??'This Mac'}<small>{host?`${host.logical_cpu_cores} CPU cores · ${(host.memory_bytes/1024**3).toFixed(0)} GiB unified memory`:'Connect the local processing engine'}</small></div></div><div><span>CPU usage {busy?'· live':'· last'}</span><strong>{sample?.cpu_core_equivalents!=null?`${sample.cpu_core_equivalents.toFixed(1)} cores`:'—'}</strong></div><div><span><MemoryStick size={12}/> Process memory</span><strong>{bytes(sample?.rss_bytes)}</strong></div><div><span>Available memory</span><strong>{bytes(sample?.system_available_memory_bytes??host?.available_memory_bytes)}</strong></div><div><span>GPU command</span><strong>{gpu==null?'—':`${(gpu*1000).toFixed(1)} ms`}</strong><small>Occupancy unavailable</small></div></section>
- </main></div><footer>Native CPU · Metal geometry & blending · MPS masks<span>Local coordinates · no source footage leaves this Mac</span></footer></div>;
+  const [live, setLive] = useState<LiveRun | null>(null);
+  const liveRef = useRef<LiveRun | null>(null);
+  liveRef.current = live;
+  const [error, setError] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const refreshSettings = useCallback(async () => {
+    try { setSettings(await api.settings()); } catch (e) { setError(errorText(e)); }
+  }, []);
+  useEffect(() => { if (inTauri || mock) void refreshSettings(); }, [refreshSettings]);
+
+  useEffect(() => {
+    if (!inTauri && !mock) return;
+    let disposed = false;
+    const offs: (() => void)[] = [];
+    const sub = <T,>(name: string, fn: (data: T) => void) => {
+      listen<T>(name, payload => { if (!disposed) fn(payload); }).then(off => (disposed ? off() : offs.push(off)));
+    };
+    const update = (fn: (run: LiveRun) => LiveRun) => setLive(current => (current ? fn(current) : current));
+    sub<PipelineEvent>('pipeline-event', e => {
+      if (e.run_id !== liveRef.current?.job.output) return;
+      const t = Date.now();
+      if (e.event === 'stage_started' && e.stage) {
+        const id = e.stage;
+        update(r => ({...r, status: 'running', order: r.order.includes(id) ? r.order : [...r.order, id], stages: {...r.stages, [id]: {id, status: 'running', startedAt: t}}}));
+      } else if (e.event === 'stage_cached' && e.stage) {
+        const id = e.stage;
+        update(r => ({...r, status: 'running', order: r.order.includes(id) ? r.order : [...r.order, id], stages: {...r.stages, [id]: {id, status: 'cached'}}}));
+      } else if (e.event === 'progress' && e.stage) {
+        const id = e.stage;
+        update(r => ({...r, stages: {...r.stages, [id]: {...r.stages[id], id, status: 'running', done: e.done, total: e.total}}}));
+      } else if (e.event === 'stage_completed' && e.stage) {
+        const id = e.stage;
+        update(r => ({...r, stages: {...r.stages, [id]: {id, status: 'complete', wall_s: e.wall_s ?? (r.stages[id]?.startedAt ? (t - r.stages[id].startedAt!) / 1000 : null)}}}));
+      } else if (e.event === 'resources') {
+        update(r => ({...r, cpu: e.cpu_core_equivalents ?? null, memory: e.rss_bytes ?? null}));
+      } else if (e.event === 'failed' || e.event === 'cancelled') {
+        const kind = e.event;
+        update(r => ({...r, status: kind, finishedAt: t, error: e.message ?? r.error, stages: e.stage ? {...r.stages, [e.stage]: {...r.stages[e.stage], id: e.stage, status: kind}} : r.stages}));
+      } else if (e.event === 'completed') {
+        update(r => ({...r, status: 'completed', finishedAt: t}));
+      }
+    });
+    sub<{run_id: string; message: string}>('job-log', e => {
+      if (e.run_id !== liveRef.current?.job.output) return;
+      update(r => ({...r, logs: [...r.logs.slice(-199), e.message]}));
+    });
+    sub<{run_id: string; code: number}>('job-exit', e => {
+      if (e.run_id !== liveRef.current?.job.output) return;
+      update(r => {
+        const status: RunStatus = r.status === 'completed' || r.status === 'failed' || r.status === 'cancelled' ? r.status : e.code === 0 ? 'completed' : e.code === 130 ? 'cancelled' : 'failed';
+        // A failure before the first stage (bad inputs, missing binary) has no stage event; keep the last stderr line as the reason.
+        const error = r.error ?? (status === 'failed' ? (r.logs.filter(l => l.trim()).pop() ?? 'Processing failed before the first step.') : null);
+        return {...r, status, finishedAt: r.finishedAt ?? Date.now(), error};
+      });
+      setReloadKey(k => k + 1);
+    });
+    sub<string>('close-blocked', setError);
+    return () => { disposed = true; offs.forEach(off => off()); };
+  }, []);
+
+  async function startRun(project: Project, input: Input, options: Options) {
+    const job: Job = {...options, capture: input.path, output: `${project.path}/runs/${runFolderName()}`, resume: false};
+    await launch(project.path, job);
+  }
+  async function resumeRun(project: Project, run: Run) {
+    const job: Job = {...run.options, capture: run.capture, output: run.path, resume: true};
+    await launch(project.path, job, run);
+  }
+  async function launch(projectPath: string, job: Job, previous?: Run) {
+    const forecast = stagesFor(job).map(s => s.id);
+    const stages: Record<string, StageState> = {};
+    for (const id of forecast) stages[id] = {id, status: 'pending'};
+    if (previous) for (const s of previous.stages) if (s.status === 'complete') stages[s.id] = {id: s.id, status: 'pending', wall_s: s.wall_s};
+    setLive({project: projectPath, job, status: 'starting', order: [], stages, startedAt: Date.now(), finishedAt: null, error: null, cpu: null, memory: null, logs: []});
+    setError('');
+    try { await api.startJob(job); }
+    catch (e) { setLive(r => (r ? {...r, status: 'failed', finishedAt: Date.now(), error: errorText(e)} : r)); }
+  }
+  async function cancelRun() {
+    try { await api.cancelJob(); } catch (e) { setError(errorText(e)); }
+  }
+
+  const openProject = (path: string) => { localStorage.setItem('lastProject', path); setScreen({kind: 'project', path}); };
+  const openProjects = () => { localStorage.removeItem('lastProject'); setScreen({kind: 'projects'}); };
+
+  // Review mode: ?mock&screen=running starts a simulated run on load.
+  useEffect(() => {
+    if (!mock || new URLSearchParams(location.search).get('screen') !== 'running' || !settings) return;
+    void api.openProject('').then(p => startRun(p, p.inputs[0], {resources: 'throughput', memory_gb: 16, color: true, mask: 'person', exposure: 'local', pose_refinement: true}));
+  }, [settings]);
+
+  if (!inTauri && !mock) return <div className="center"><p>Open S20 Studio through the desktop app.</p></div>;
+  if (!settings) return <div className="center"><p>Starting</p></div>;
+
+  return (
+    <>
+      {screen.kind === 'projects' && (
+        <Projects settings={settings} live={live} onOpen={openProject} onSettings={() => setShowSettings(true)} onError={setError} />
+      )}
+      {screen.kind === 'project' && (
+        <ProjectScreen key={screen.path} path={screen.path} settings={settings} live={live} reloadKey={reloadKey}
+          onBack={openProjects} onSettings={() => setShowSettings(true)} onError={setError}
+          onStart={startRun} onResume={resumeRun} onCancel={cancelRun}
+          onOpenViewer={(focus?: string) => setScreen({kind: 'viewer', path: screen.path, focus})} />
+      )}
+      {screen.kind === 'viewer' && (
+        <Viewer key={screen.path} path={screen.path} focus={screen.focus} onBack={() => setScreen({kind: 'project', path: screen.path})} onError={setError} />
+      )}
+      <div className="toasts"><ErrorBar message={error} onClose={() => setError('')} /></div>
+      {showSettings && <SettingsDialog settings={settings} busy={!!live && (live.status === 'running' || live.status === 'starting')} onChange={refreshSettings} onClose={() => setShowSettings(false)} onError={setError} />}
+    </>
+  );
 }
-function Stat({icon,label,value,detail}:{icon:React.ReactNode;label:string;value:string;detail:string}){return <div className="stat"><span>{icon}{label}</span><strong>{value}</strong><small>{detail}</small></div>}
-createRoot(document.getElementById('root')!).render(<App/>);
+
+function SettingsDialog({settings, busy, onChange, onClose, onError}: {settings: Settings; busy: boolean; onChange: () => void; onClose: () => void; onError: (m: string) => void}) {
+  async function chooseEngine() {
+    const p = await pickFolder('Choose the s20-pipeline folder');
+    if (!p) return;
+    try { await api.configure(p); onChange(); } catch (e) { onError(errorText(e)); }
+  }
+  async function chooseProjects() {
+    const p = await pickFolder('Choose where projects are stored');
+    if (!p) return;
+    try { await api.setProjectsRoot(p); onChange(); } catch (e) { onError(errorText(e)); }
+  }
+  return (
+    <Modal title="Settings" onClose={onClose} width={520}>
+      <div className="setting">
+        <span>Projects folder</span>
+        <code title={settings.projects_root}>{settings.projects_root}</code>
+        <div className="row"><button onClick={chooseProjects}>Change</button><button onClick={() => api.reveal(settings.projects_root)}>Show in Finder</button></div>
+      </div>
+      <div className="setting">
+        <span>Processing engine</span>
+        <code title={settings.engine_root}>{settings.engine_root}</code>
+        <p className="note">{settings.engine_ready ? 'Python environment and native binaries found.' : 'Not usable yet: the folder needs a built .venv and build/s20_geometry. See the pipeline README.'}</p>
+        <div className="row"><button onClick={chooseEngine} disabled={busy}>Change</button></div>
+      </div>
+    </Modal>
+  );
+}
+
+createRoot(document.getElementById('root')!).render(<App />);

@@ -99,6 +99,125 @@ def preview(source, cache, budget):
     return result
 
 
+def _chunks(source):
+    """Yield (xyz float64, rgb float 0-1 or None) chunks plus header info for a LAS/PLY source."""
+    if source.suffix.lower() == ".las":
+        import laspy
+
+        reader = laspy.open(source)
+        n = reader.header.point_count
+        info = {"scales": reader.header.scales.tolist(), "offsets": reader.header.offsets.tolist()}
+
+        def gen():
+            with reader:
+                for points in reader.chunk_iterator(262144):
+                    xyz = np.column_stack([points.x, points.y, points.z])
+                    names = set(points.point_format.dimension_names)
+                    rgb = (
+                        np.column_stack([points.red, points.green, points.blue]).astype("<f8") / 65535
+                        if "red" in names
+                        else None
+                    )
+                    yield xyz, rgb
+
+        return n, info, gen
+    if source.suffix.lower() == ".ply":
+        from .ply import map_points, read_ply_info
+
+        data = map_points(read_ply_info(source))
+        n = len(data)
+        names = data.dtype.names
+        has_rgb = all(k in names for k in ("red", "green", "blue"))
+
+        def gen():
+            for start in range(0, n, 262144):
+                part = data[start : start + 262144]
+                xyz = np.column_stack([part[k].astype("<f8") for k in ("x", "y", "z")])
+                rgb = (
+                    np.column_stack([part[k].astype("<f8") for k in ("red", "green", "blue")]) / 255
+                    if has_rgb
+                    else None
+                )
+                yield xyz, rgb
+
+        return n, {"scales": [0.0001] * 3, "offsets": None}, gen
+    raise ValueError("Slice export supports uncompressed LAS or binary PLY sources")
+
+
+def export_slices(spec):
+    """Write points inside the union of boxes per source to one LAS file.
+
+    spec = {"output": path, "sources": [{"path": str, "boxes": [[[minx,miny,minz],[maxx,maxy,maxz]], ...]}]}
+    A point is written once even when it lies inside several boxes of the same source.
+    Progress lines are printed as JSON so the desktop app can show them.
+    """
+    import laspy
+
+    output = Path(spec["output"])
+    if output.suffix.lower() != ".las":
+        raise ValueError("Slice export writes .las files")
+    if output.exists():
+        raise FileExistsError(f"Export already exists: {output}")
+    sources = []
+    total = 0
+    for item in spec["sources"]:
+        source = Path(item["path"]).resolve(strict=True)
+        boxes = np.asarray(item["boxes"], dtype="<f8")
+        if boxes.ndim != 3 or boxes.shape[1:] != (2, 3) or not np.isfinite(boxes).all():
+            raise ValueError("Boxes must be [[min xyz],[max xyz]] triples")
+        n, info, gen = _chunks(source)
+        sources.append((source, boxes, n, info, gen))
+        total += n
+    if not sources:
+        raise ValueError("Nothing to export")
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scales = np.asarray(sources[0][3]["scales"], dtype="<f8")
+    first_offsets = sources[0][3]["offsets"]
+    if first_offsets is None:
+        # PLY has no offsets; centre on the first box so int32 coordinates stay in range.
+        first_offsets = np.floor(sources[0][1][0, 0])
+    header.offsets = np.asarray(first_offsets, dtype="<f8")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".las.tmp")
+    done = 0
+    written = 0
+    last = 0.0
+    import time
+
+    with laspy.open(temporary, mode="w", header=header) as writer:
+        for source, boxes, n, info, gen in sources:
+            for xyz, rgb in gen():
+                mask = np.zeros(len(xyz), dtype=bool)
+                for low, high in boxes:
+                    mask |= np.all((xyz >= low) & (xyz <= high), axis=1)
+                ids = np.flatnonzero(mask)
+                if len(ids):
+                    records = laspy.ScaleAwarePointRecord.zeros(len(ids), header=header)
+                    records.x = xyz[ids, 0]
+                    records.y = xyz[ids, 1]
+                    records.z = xyz[ids, 2]
+                    colors = (
+                        np.rint(np.clip(rgb[ids], 0, 1) * 65535).astype("uint16")
+                        if rgb is not None
+                        else np.full((len(ids), 3), 47000, dtype="uint16")
+                    )
+                    records.red = colors[:, 0]
+                    records.green = colors[:, 1]
+                    records.blue = colors[:, 2]
+                    writer.write_points(records)
+                    written += len(ids)
+                done += len(xyz)
+                now = time.monotonic()
+                if now - last > 0.25:
+                    last = now
+                    print(json.dumps({"event": "progress", "done": done, "total": total}), flush=True)
+    if not written:
+        temporary.unlink(missing_ok=True)
+        raise ValueError("No points inside the selected slices")
+    temporary.replace(output)
+    return {"event": "completed", "file": str(output), "points": written, "source_points": total}
+
+
 def main():
     p = argparse.ArgumentParser()
     s = p.add_subparsers(dest="command", required=True)
@@ -109,6 +228,8 @@ def main():
     v.add_argument("source", type=Path)
     v.add_argument("cache", type=Path)
     v.add_argument("--budget", type=int, default=1000000)
+    e = s.add_parser("export-slices")
+    e.add_argument("spec", type=Path, help="JSON file: {output, sources:[{path, boxes}]}")
     a = p.parse_args()
     if a.command == "inspect":
         capture = inspect_capture(a.capture)
@@ -116,6 +237,8 @@ def main():
         result = {"capture": capture, "hardware": host, "estimate": estimate(capture, host)}
     elif a.command == "hardware":
         result = hardware()
+    elif a.command == "export-slices":
+        result = export_slices(json.loads(a.spec.read_text()))
     else:
         result = preview(a.source, a.cache, a.budget)
     print(json.dumps(result))

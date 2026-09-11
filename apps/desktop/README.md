@@ -1,10 +1,12 @@
 # S20 Studio desktop
 
-A working Tauri 2 + React desktop app around the native pipeline. It opens raw capture folders, shows bag/device metadata and a provisional time estimate, runs configurable processing, streams stage progress/resources, cancels and resumes jobs, and displays bounded point-cloud previews with a linked-camera reference pane.
+Tauri 2 + React desktop app around the native pipeline. Work is organised in
+projects: add raw S20 scan folders to a project, process them, and open the
+resulting point clouds in the viewer to slice and export them.
 
 ## Start locally
 
-Install/build the engine first, following the repository README. Then:
+Install and build the engine first, following the repository README. Then:
 
 ```sh
 cd apps/desktop
@@ -12,38 +14,65 @@ npm ci
 npm run desktop
 ```
 
-To build a local macOS application:
+`start.command` does the same from Finder. To build a local macOS application:
 
 ```sh
 npm run tauri -- build --debug --bundles app
 ```
 
-The app bundle is under `src-tauri/target/debug/bundle/macos/S20 Studio.app`. It currently uses the repository's `.venv` and `build` directory. Engine settings can select a different installed checkout. **This is a development application for this Mac, not a self-contained signed distribution.** Python, native executables and model weights are not yet bundled inside the `.app`.
+The app uses the repository's `.venv` and `build` directory as its engine. A
+different checkout can be chosen in Settings. This is a development build for
+this Mac: Python, native binaries and model weights are not bundled.
 
-Use **Choose raw capture** to select `/Volumes/SD_CARD/Test`, then choose a separate output parent. A new child folder is generated for every run. Select Max to use the throughput profile. Cancel preserves completed stages; Resume last run verifies the original options/inputs/code before reusing them. A changed pipeline requires a fresh run.
+## Workflow
 
-## Inspector
+**Projects.** Projects live as folders under a projects root (default
+`~/Documents/S20 Projects`, changeable in Settings). Each holds `project.json`,
+`runs/` and `exports/`. Every run is an ordinary pipeline output directory, so
+the app reconstructs run history from the pipeline's own `job.json`,
+`state.json`, `receipts/` and `events.jsonl`.
 
-Open an uncompressed LAS or binary PLY. The Python bridge streams deterministic samples into a cached binary buffer, with a maximum of two million displayed points per pane. Raw LAS coordinates are rebased before converting to float32. File data crosses IPC as binary, not millions of JSON records. Photo colors are displayed directly through the adapted comparison shader, without a second sRGB conversion.
+**Scans.** A scan is a raw capture folder referenced in place. It is inspected
+once when added and only ever read. If the drive is unmounted the scan shows a
+warning and cannot be processed until it is back.
 
-The renderer adapts the existing Three.js/OrbitControls comparison approach: shared camera, scissored panes and on-demand drawing. Generic bounds replace the indoor hard-coded camera presets. Display sampling leaves exported files untouched. Reference clouds retain their coordinates; the app does not align unrelated coordinate frames automatically.
+**Runs.** New run shows four choices (result type, remove people, exposure,
+performance) plus memory limit and pose refinement under Advanced. While a run
+processes, the steps are listed like a build pipeline: done steps show their
+time, the running step shows a live counter and the list keeps it centred,
+the header shows the total elapsed time. A failed or cancelled run shows the
+error under the step, can reveal that step's log, and can be resumed.
 
-This first version reads the source cloud to create a sample. It is **not an octree/LOD system**, and generating a preview for a very large cloud can take time. Tiled out-of-core viewing is the next rendering milestone.
+**Viewer.** The canvas fills the window. Perspective or axis-locked
+orthographic views (Top, Front, Side, with a flip and a scale bar). Keys 7, 1,
+3 and 5 switch views, `f` fits, `s` toggles slicing.
 
-## Resource and progress contract
+**Slices.** In an axis view, press Slice and drag a rectangle. The rectangle
+becomes an axis-aligned box spanning the parent's full depth; a slice of a
+slice is the intersection, so the Top view cuts a footprint and the Front view
+then trims its height. Slices nest under their source cloud in the right-hand
+list. Checked items are shown, and shown is what gets exported. The panel
+edits the selected slice's bounds numerically. Slices are stored in
+`project.json`.
 
-Python/native workers own processing. Rust launches argument arrays (no shell), forwards JSONL events and handles process exit. User Cancel sends SIGINT to the pipeline parent; the pipeline terminates its worker process group. Closing/quitting while processing asks the user to cancel first. Auxiliary inspectors/previews are terminated on exit.
+**Export.** "Export checked" writes a LAS file into the project's `exports/`
+folder, reading the full-resolution source, not the preview. One checked item
+asks for a file name. Several ask whether to write one combined file (a point
+inside more than one slice is written once) or separate files. Right-click a
+slice for Export, Rename, Slice from here and Delete. Exports reappear in the
+list as point clouds.
 
-Numeric progress appears when a stage exposes counts; other stages are indeterminate with elapsed time. Resource events show CPU core equivalents, sampled RSS and available memory. GPU command time is distinct from system GPU occupancy, which remains unavailable. Current estimates use the reference pipeline model; they are not calibrated for every option/hardware combination.
+## Review without Tauri
 
-## Validation
+`npm run dev` then open `http://127.0.0.1:1420/?mock&screen=projects` (or
+`screen=project`, `project&select=new`, `running`, `viewer&view=top`) to review
+the UI in a browser against fake data.
 
-- The native app was used to inspect the original Test capture and launch the full pipeline.
-- Cancel was tested during Metal geometry. Resume reused five completed stages and completed all 14 stages, then loaded a preview of the 6.02-million-point colored result.
-- Python tests cover bounded preview size, large-coordinate rebasing, RGB values, cache reuse and preservation of source bytes.
-- Frontend tests cover optional-stage selection and missing telemetry values.
-- Rust tests cover literal path arguments, option validation and geometry-only/resume flags.
+## Tests
 
-Run `npm test`, `npm run build`, `cargo test --manifest-path src-tauri/Cargo.toml`, and the repository Python test suite. The lockfiles pin npm/Cargo dependencies. The latest local npm audit reported no known vulnerabilities.
-
-Next: package the runtime/weights, add native count events and per-option ETA calibration, preserve jobs across application upgrades, implement tiled LOD, and add a calibrated registration workflow for reference clouds in different frames.
+```sh
+npm test                                   # stage selection, durations, slice geometry
+npm run build                              # type check and bundle
+cargo test --manifest-path src-tauri/Cargo.toml   # argument building, run reconstruction
+../../.venv/bin/python -m pytest -q ../../tests/test_desktop.py   # previews and slice export
+```

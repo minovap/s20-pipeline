@@ -1,15 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! S20 Studio shell. Owns settings, project folders, the pipeline process and
+//! bounded point-cloud previews. All computation runs in Python/native workers;
+//! this file never interpolates a shell command.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    fs,
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Mutex,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{Emitter, Manager, State};
 
@@ -23,20 +28,37 @@ fn stop_auxiliary() {
         }
     }
 }
+
 struct Engine {
     root: Mutex<PathBuf>,
+    projects: Mutex<PathBuf>,
     running: AtomicBool,
     pid: AtomicU32,
+    export_pid: AtomicU32,
+    exporting: AtomicBool,
     previews: Mutex<HashMap<String, PathBuf>>,
+}
+
+fn now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.)
 }
 fn root(state: &Engine) -> Result<PathBuf, String> {
     Ok(state.root.lock().map_err(|e| e.to_string())?.clone())
+}
+fn projects_root(state: &Engine) -> Result<PathBuf, String> {
+    Ok(state.projects.lock().map_err(|e| e.to_string())?.clone())
+}
+fn engine_ready(root: &Path) -> bool {
+    root.join(".venv/bin/python").is_file() && root.join("build/s20_geometry").is_file()
 }
 fn python(root: &PathBuf) -> Result<Command, String> {
     let p = root.join(".venv/bin/python");
     if !p.is_file() {
         return Err(
-            "Pipeline environment missing. Select an installed s20-pipeline checkout in Settings."
+            "Pipeline environment missing. Choose the installed s20-pipeline folder in Settings."
                 .into(),
         );
     }
@@ -68,12 +90,51 @@ fn bridge(root: PathBuf, args: Vec<String>) -> Result<Value, String> {
     }
     serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
 }
-#[tauri::command]
-fn configuration(state: State<Engine>) -> Result<Value, String> {
-    let p = root(&state)?;
-    Ok(
-        json!({"root":p,"ready":p.join(".venv/bin/python").is_file()&&p.join("build/s20_geometry").is_file(),"running":state.running.load(Ordering::SeqCst)}),
+fn read_json(path: &Path) -> Option<Value> {
+    fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+fn write_json(path: &Path, value: &Value) -> Result<(), String> {
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    fs::rename(temporary, path).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------- settings
+
+#[derive(Serialize, Deserialize, Default)]
+struct Settings {
+    engine: Option<PathBuf>,
+    projects: Option<PathBuf>,
+}
+fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("settings.json"))
+}
+fn save_settings(app: &tauri::AppHandle, state: &Engine) -> Result<(), String> {
+    let value = Settings {
+        engine: Some(root(state)?),
+        projects: Some(projects_root(state)?),
+    };
+    fs::write(
+        settings_path(app)?,
+        serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?,
     )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn settings(state: State<Engine>) -> Result<Value, String> {
+    let engine = root(&state)?;
+    Ok(json!({
+        "engine_root": engine,
+        "engine_ready": engine_ready(&engine),
+        "projects_root": projects_root(&state)?,
+        "running": state.running.load(Ordering::SeqCst),
+    }))
 }
 #[tauri::command]
 fn configure(path: String, app: tauri::AppHandle, state: State<Engine>) -> Result<(), String> {
@@ -84,21 +145,22 @@ fn configure(path: String, app: tauri::AppHandle, state: State<Engine>) -> Resul
         .canonicalize()
         .map_err(|e| e.to_string())?;
     if !p.join(".venv/bin/python").is_file() || !p.join("src/s20_pipeline/cli.py").is_file() {
-        return Err("Select the installed s20-pipeline repository folder.".into());
+        return Err("Choose the installed s20-pipeline repository folder.".into());
     }
-    let dest = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-    std::fs::write(dest.join("engine.json"), serde_json::to_vec(&p).unwrap())
-        .map_err(|e| e.to_string())?;
     *state.root.lock().map_err(|e| e.to_string())? = p;
-    Ok(())
+    save_settings(&app, &state)
 }
 #[tauri::command]
-async fn inspect_capture(path: String, state: State<'_, Engine>) -> Result<Value, String> {
-    let p = root(&state)?;
-    tauri::async_runtime::spawn_blocking(move || bridge(p, vec!["inspect".into(), path]))
-        .await
-        .map_err(|e| e.to_string())?
+fn set_projects_root(
+    path: String,
+    app: tauri::AppHandle,
+    state: State<Engine>,
+) -> Result<(), String> {
+    let p = PathBuf::from(path);
+    fs::create_dir_all(&p).map_err(|e| e.to_string())?;
+    *state.projects.lock().map_err(|e| e.to_string())? =
+        p.canonicalize().map_err(|e| e.to_string())?;
+    save_settings(&app, &state)
 }
 #[tauri::command]
 async fn hardware(state: State<'_, Engine>) -> Result<Value, String> {
@@ -107,6 +169,327 @@ async fn hardware(state: State<'_, Engine>) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?
 }
+#[tauri::command]
+fn reveal(path: String) -> Result<(), String> {
+    if !Path::new(&path).exists() {
+        return Err("That folder no longer exists".into());
+    }
+    Command::new("open")
+        .arg("-R")
+        .arg(&path)
+        .status()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- projects
+
+/// A project is a folder under the projects root holding `project.json`,
+/// `runs/<run>/` pipeline output directories and `exports/` slice exports.
+fn project_file(state: &Engine, project: &str) -> Result<(PathBuf, PathBuf), String> {
+    let root = projects_root(state)?;
+    let folder = PathBuf::from(project)
+        .canonicalize()
+        .map_err(|_| "Project folder not found".to_string())?;
+    if !folder.starts_with(&root) || folder == root {
+        return Err("Project is outside the projects folder".into());
+    }
+    let file = folder.join("project.json");
+    if !file.is_file() {
+        return Err("Not a project folder".into());
+    }
+    Ok((folder, file))
+}
+fn slug(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '-' })
+        .collect();
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        "Project".into()
+    } else {
+        s
+    }
+}
+fn summarize(folder: &Path) -> Option<Value> {
+    let mut project = read_json(&folder.join("project.json"))?;
+    let runs = read_runs(folder);
+    let last = runs.first().cloned();
+    project["path"] = json!(folder);
+    project["run_count"] = json!(runs.len());
+    project["last_run"] = last.unwrap_or(Value::Null);
+    project["input_count"] = json!(project["inputs"].as_array().map(|a| a.len()).unwrap_or(0));
+    Some(project)
+}
+
+/// Reconstruct a run's state from the pipeline's own on-disk records.
+fn read_run(folder: &Path) -> Option<Value> {
+    let job = read_json(&folder.join("job.json"))?;
+    let state = read_json(&folder.join("state.json")).unwrap_or(json!({}));
+    let mut stages: Vec<Value> = Vec::new();
+    let mut started: Option<f64> = None;
+    let mut finished: Option<f64> = None;
+    let mut order: Vec<String> = Vec::new();
+    if let Ok(text) = fs::read_to_string(folder.join("events.jsonl")) {
+        for line in text.lines() {
+            let Ok(event) = serde_json::from_str::<Value>(line) else { continue };
+            let time = event["time_unix"].as_f64();
+            if started.is_none() {
+                started = time;
+            }
+            let kind = event["event"].as_str().unwrap_or("");
+            if kind == "stage_started" || kind == "stage_cached" {
+                if let Some(stage) = event["stage"].as_str() {
+                    order.push(stage.to_string());
+                }
+            }
+            if matches!(kind, "completed" | "failed" | "cancelled") {
+                finished = time;
+            }
+        }
+    }
+    for stage in &order {
+        let receipt = read_json(&folder.join("receipts").join(format!("{stage}.json")));
+        stages.push(json!({
+            "id": stage,
+            "status": if receipt.is_some() { "complete" } else { "incomplete" },
+            "wall_s": receipt.as_ref().and_then(|r| r["wall_s"].as_f64()),
+        }));
+    }
+    let status = state["status"].as_str().unwrap_or("unknown");
+    let color = job["options"]["color"].as_bool().unwrap_or(true);
+    let result = if color {
+        folder.join("export/colorized.las")
+    } else {
+        folder.join("geometry/filtered.ply")
+    };
+    let result_exists = result.is_file() && status == "completed";
+    Some(json!({
+        "path": folder,
+        "name": folder.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+        "status": if status == "running" { "interrupted" } else { status },
+        "stage": state["stage"],
+        "error": state["error"],
+        "started": started,
+        "finished": finished,
+        "capture": job["capture"],
+        "options": {
+            "color": color,
+            "mask": job["options"]["mask"],
+            "exposure": job["options"]["exposure"],
+            "pose_refinement": job["options"]["pose_refinement"],
+            "resources": job["options"]["resources"],
+            "memory_gb": job["options"]["memory_gb"],
+        },
+        "stages": stages,
+        "result": if result_exists { json!(result) } else { Value::Null },
+        "result_points": read_json(&folder.join("export/result.json")).and_then(|r| r["colored_points"].as_u64()),
+    }))
+}
+fn read_runs(folder: &Path) -> Vec<Value> {
+    let mut runs: Vec<Value> = fs::read_dir(folder.join("runs"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| read_run(&e.path()))
+                .collect()
+        })
+        .unwrap_or_default();
+    runs.sort_by(|a, b| b["name"].as_str().cmp(&a["name"].as_str()));
+    runs
+}
+fn read_exports(folder: &Path) -> Vec<Value> {
+    let mut files: Vec<Value> = fs::read_dir(folder.join("exports"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let p = e.path();
+                    p.is_file()
+                        && matches!(
+                            p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase()),
+                            Some(ref x) if x == "las" || x == "ply"
+                        )
+                })
+                .map(|e| {
+                    let p = e.path();
+                    let meta = e.metadata().ok();
+                    json!({
+                        "path": p,
+                        "name": p.file_stem().and_then(|n| n.to_str()).unwrap_or(""),
+                        "bytes": meta.as_ref().map(|m| m.len()),
+                        "modified": meta.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs_f64()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort_by(|a, b| b["modified"].as_f64().partial_cmp(&a["modified"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    files
+}
+fn full_project(folder: &Path) -> Result<Value, String> {
+    let mut project = read_json(&folder.join("project.json")).ok_or("Project file unreadable")?;
+    project["path"] = json!(folder);
+    project["runs"] = json!(read_runs(folder));
+    project["exports"] = json!(read_exports(folder));
+    if !project["inputs"].is_array() {
+        project["inputs"] = json!([]);
+    }
+    if !project["slices"].is_array() {
+        project["slices"] = json!([]);
+    }
+    if !project["clouds"].is_array() {
+        project["clouds"] = json!([]);
+    }
+    Ok(project)
+}
+
+#[tauri::command]
+fn list_projects(state: State<Engine>) -> Result<Vec<Value>, String> {
+    let root = projects_root(&state)?;
+    let mut projects: Vec<Value> = fs::read_dir(&root)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| summarize(&e.path()))
+                .collect()
+        })
+        .unwrap_or_default();
+    projects.sort_by(|a, b| {
+        let ta = a["last_run"]["started"].as_f64().or(a["created"].as_f64()).unwrap_or(0.);
+        let tb = b["last_run"]["started"].as_f64().or(b["created"].as_f64()).unwrap_or(0.);
+        tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(projects)
+}
+#[tauri::command]
+fn create_project(name: String, state: State<Engine>) -> Result<Value, String> {
+    let root = projects_root(&state)?;
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let base = slug(&name);
+    let mut folder = root.join(&base);
+    let mut n = 2;
+    while folder.exists() {
+        folder = root.join(format!("{base} {n}"));
+        n += 1;
+    }
+    fs::create_dir_all(folder.join("runs")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(folder.join("exports")).map_err(|e| e.to_string())?;
+    write_json(
+        &folder.join("project.json"),
+        &json!({
+            "schema": 1,
+            "name": if name.trim().is_empty() { base.clone() } else { name.trim().to_string() },
+            "created": now(),
+            "inputs": [],
+            "clouds": [],
+            "slices": [],
+        }),
+    )?;
+    full_project(&folder)
+}
+#[tauri::command]
+fn open_project(path: String, state: State<Engine>) -> Result<Value, String> {
+    let (folder, _) = project_file(&state, &path)?;
+    full_project(&folder)
+}
+/// Persist the editable part of a project: name, inputs, clouds, slices.
+#[tauri::command]
+fn write_project(path: String, project: Value, state: State<Engine>) -> Result<Value, String> {
+    let (folder, file) = project_file(&state, &path)?;
+    let mut stored = read_json(&file).unwrap_or(json!({"schema":1}));
+    for key in ["name", "inputs", "clouds", "slices"] {
+        if !project[key].is_null() {
+            stored[key] = project[key].clone();
+        }
+    }
+    write_json(&file, &stored)?;
+    full_project(&folder)
+}
+#[tauri::command]
+async fn add_input(
+    project: String,
+    capture: String,
+    state: State<'_, Engine>,
+) -> Result<Value, String> {
+    let (folder, file) = project_file(&state, &project)?;
+    let p = root(&state)?;
+    let inspected = tauri::async_runtime::spawn_blocking(move || {
+        bridge(p, vec!["inspect".into(), capture])
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let capture_path = inspected["capture"]["capture"]
+        .as_str()
+        .ok_or("Inspection returned no capture path")?
+        .to_string();
+    let mut stored = read_json(&file).ok_or("Project file unreadable")?;
+    let mut inputs = stored["inputs"].as_array().cloned().unwrap_or_default();
+    inputs.retain(|i| i["path"].as_str() != Some(capture_path.as_str()));
+    inputs.push(json!({
+        "path": capture_path,
+        "name": Path::new(&capture_path).file_name().and_then(|n| n.to_str()).unwrap_or("capture"),
+        "added": now(),
+        "capture": inspected["capture"],
+        "estimate": inspected["estimate"],
+    }));
+    stored["inputs"] = json!(inputs);
+    write_json(&file, &stored)?;
+    full_project(&folder)
+}
+#[tauri::command]
+fn input_available(path: String) -> bool {
+    Path::new(&path).is_dir()
+}
+#[tauri::command]
+fn read_stage_log(run: String, stage: String, state: State<Engine>) -> Result<String, String> {
+    let root = projects_root(&state)?;
+    let folder = PathBuf::from(&run).canonicalize().map_err(|e| e.to_string())?;
+    if !folder.starts_with(&root) {
+        return Err("Run is outside the projects folder".into());
+    }
+    if stage.contains('/') || stage.contains("..") {
+        return Err("Invalid stage".into());
+    }
+    let path = folder.join("logs").join(format!("{stage}.log"));
+    let bytes = fs::read(&path).map_err(|_| "No log for this step yet".to_string())?;
+    let tail = if bytes.len() > 65536 { &bytes[bytes.len() - 65536..] } else { &bytes[..] };
+    Ok(String::from_utf8_lossy(tail).into_owned())
+}
+#[tauri::command]
+fn delete_run(run: String, state: State<Engine>) -> Result<(), String> {
+    if state.running.load(Ordering::SeqCst) {
+        return Err("Wait for the active job to finish first".into());
+    }
+    let root = projects_root(&state)?;
+    let folder = PathBuf::from(&run).canonicalize().map_err(|e| e.to_string())?;
+    let is_run = folder.starts_with(&root)
+        && folder.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("runs")
+        && folder.join("job.json").is_file();
+    if !is_run {
+        return Err("Not a run folder".into());
+    }
+    fs::remove_dir_all(folder).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn delete_export(path: String, state: State<Engine>) -> Result<(), String> {
+    let root = projects_root(&state)?;
+    let file = PathBuf::from(&path).canonicalize().map_err(|e| e.to_string())?;
+    let ok = file.starts_with(&root)
+        && file.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("exports")
+        && file.is_file();
+    if !ok {
+        return Err("Not an export file".into());
+    }
+    fs::remove_file(file).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------- jobs
+
 #[derive(Deserialize, Serialize, Clone)]
 struct JobOptions {
     capture: String,
@@ -178,6 +561,9 @@ fn start_job(
     {
         return Err("Another processing job is already running".into());
     }
+    if let Some(parent) = Path::new(&options.output).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     let child = command
         .args(args)
         .stdout(Stdio::piped())
@@ -233,6 +619,124 @@ fn cancel_job(state: State<Engine>) -> Result<(), String> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------- slice export
+
+/// Run the Python slice exporter in the background. Progress arrives as
+/// `export-event` with the export id; the spec is written to a temporary file
+/// so no coordinates pass through argv.
+#[tauri::command]
+fn export_slices(
+    spec: Value,
+    app: tauri::AppHandle,
+    state: State<Engine>,
+) -> Result<String, String> {
+    let output = spec["output"].as_str().ok_or("Export needs an output path")?;
+    let root = projects_root(&state)?;
+    let out = PathBuf::from(output);
+    let parent = out.parent().ok_or("Invalid output path")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let parent = parent.canonicalize().map_err(|e| e.to_string())?;
+    if !parent.starts_with(&root) && !spec["allow_outside"].as_bool().unwrap_or(false) {
+        return Err("Export location must be inside a project".into());
+    }
+    if state
+        .exporting
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Another export is still running".into());
+    }
+    let id = format!("export-{}", now());
+    let cache = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    let spec_path = cache.join(format!("{id}.json"));
+    if let Err(e) = fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()) {
+        state.exporting.store(false, Ordering::SeqCst);
+        return Err(e.to_string());
+    }
+    let mut command = match python(&root_or_reset(&state)) {
+        Ok(c) => c,
+        Err(e) => {
+            state.exporting.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    let child = command
+        .args(["-m", "s20_pipeline.desktop", "export-slices"])
+        .arg(&spec_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            state.exporting.store(false, Ordering::SeqCst);
+            return Err(e.to_string());
+        }
+    };
+    state.export_pid.store(child.id(), Ordering::SeqCst);
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let export_id = id.clone();
+    let name = out.file_stem().and_then(|n| n.to_str()).unwrap_or("export").to_string();
+    std::thread::spawn(move || {
+        let mut last_error = String::new();
+        let err_thread = std::thread::spawn(move || {
+            let mut text = String::new();
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                text = line;
+            }
+            text
+        });
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Ok(mut value) = serde_json::from_str::<Value>(&line) {
+                if value.is_object() {
+                    value["id"] = json!(export_id);
+                    value["name"] = json!(name);
+                    let _ = app.emit("export-event", value);
+                }
+            }
+        }
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        if let Ok(text) = err_thread.join() {
+            last_error = text;
+        }
+        let state = app.state::<Engine>();
+        state.export_pid.store(0, Ordering::SeqCst);
+        state.exporting.store(false, Ordering::SeqCst);
+        let _ = fs::remove_file(&spec_path);
+        if code != 0 {
+            let message = if last_error.is_empty() {
+                format!("Export exited with code {code}")
+            } else {
+                last_error.trim_start_matches("s20: ").to_string()
+            };
+            let _ = app.emit(
+                "export-event",
+                json!({"id": export_id, "name": name, "event": if code == 130 || code == -1 { "cancelled" } else { "failed" }, "message": message}),
+            );
+        }
+    });
+    Ok(id)
+}
+fn root_or_reset(state: &Engine) -> PathBuf {
+    root(state).unwrap_or_default()
+}
+#[tauri::command]
+fn cancel_export(state: State<Engine>) -> Result<(), String> {
+    let pid = state.export_pid.load(Ordering::SeqCst);
+    if pid == 0 {
+        return Ok(());
+    }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- previews
+
 #[tauri::command]
 async fn load_preview(
     source: String,
@@ -282,31 +786,46 @@ async fn load_preview(
 fn read_preview(key: String, state: State<Engine>) -> Result<tauri::ipc::Response, String> {
     let paths = state.previews.lock().map_err(|e| e.to_string())?;
     let p = paths.get(&key).ok_or("Preview expired; load again")?;
-    if std::fs::metadata(p).map_err(|e| e.to_string())?.len() > 48_000_000 {
+    if fs::metadata(p).map_err(|e| e.to_string())?.len() > 48_000_000 {
         return Err("Preview exceeds budget".into());
     }
     Ok(tauri::ipc::Response::new(
-        std::fs::read(p).map_err(|e| e.to_string())?,
+        fs::read(p).map_err(|e| e.to_string())?,
     ))
 }
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let default = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            let default_engine = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .ancestors()
                 .nth(3)
                 .unwrap()
                 .to_path_buf();
-            let settings = app.path().app_config_dir()?.join("engine.json");
-            let root = std::fs::read(settings)
+            let config = app.path().app_config_dir()?;
+            let stored: Settings = fs::read(config.join("settings.json"))
                 .ok()
-                .and_then(|b| serde_json::from_slice::<PathBuf>(&b).ok())
-                .unwrap_or(default);
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+            // Earlier builds stored only the engine path.
+            let legacy_engine = fs::read(config.join("engine.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<PathBuf>(&b).ok());
+            let projects = stored.projects.unwrap_or_else(|| {
+                app.path()
+                    .document_dir()
+                    .map(|d| d.join("S20 Projects"))
+                    .unwrap_or_else(|_| PathBuf::from("S20 Projects"))
+            });
+            let _ = fs::create_dir_all(&projects);
             app.manage(Engine {
-                root: Mutex::new(root),
+                root: Mutex::new(stored.engine.or(legacy_engine).unwrap_or(default_engine)),
+                projects: Mutex::new(projects),
                 running: AtomicBool::new(false),
                 pid: AtomicU32::new(0),
+                export_pid: AtomicU32::new(0),
+                exporting: AtomicBool::new(false),
                 previews: Mutex::new(HashMap::new()),
             });
             Ok(())
@@ -317,7 +836,7 @@ fn main() {
                     api.prevent_close();
                     let _ = window.emit(
                         "close-blocked",
-                        "Cancel the active job before closing S20 Studio.",
+                        "Processing is still running. Cancel it before closing.",
                     );
                 } else {
                     stop_auxiliary();
@@ -325,12 +844,24 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            configuration,
+            settings,
             configure,
-            inspect_capture,
+            set_projects_root,
             hardware,
+            reveal,
+            list_projects,
+            create_project,
+            open_project,
+            write_project,
+            add_input,
+            input_available,
+            read_stage_log,
+            delete_run,
+            delete_export,
             start_job,
             cancel_job,
+            export_slices,
+            cancel_export,
             load_preview,
             read_preview
         ])
@@ -342,7 +873,7 @@ fn main() {
                     api.prevent_exit();
                     let _ = app.emit(
                         "close-blocked",
-                        "Cancel the active job before quitting S20 Studio.",
+                        "Processing is still running. Cancel it before quitting.",
                     );
                 } else {
                     stop_auxiliary();
@@ -393,5 +924,28 @@ mod tests {
         assert!(a.contains(&"--no-color".into()));
         assert!(a.contains(&"--resume".into()));
         assert!(!a.contains(&"--camera-clock".into()));
+    }
+    #[test]
+    fn slugs_keep_names_readable() {
+        assert_eq!(slug("  Garden / north  "), "Garden - north");
+        assert_eq!(slug(""), "Project");
+    }
+    #[test]
+    fn runs_are_reconstructed_from_disk() {
+        let dir = std::env::temp_dir().join(format!("s20-run-{}", now()));
+        fs::create_dir_all(dir.join("receipts")).unwrap();
+        fs::write(dir.join("job.json"), r#"{"capture":"/c","options":{"color":false,"mask":"person","exposure":"local","pose_refinement":true,"resources":"balanced","memory_gb":16}}"#).unwrap();
+        fs::write(dir.join("state.json"), r#"{"status":"cancelled","stage":"pack","error":"stopped"}"#).unwrap();
+        fs::write(dir.join("events.jsonl"), "{\"event\":\"stage_started\",\"time_unix\":10.0,\"stage\":\"decode\"}\n{\"event\":\"stage_completed\",\"time_unix\":15.0,\"stage\":\"decode\",\"wall_s\":5.0}\n{\"event\":\"stage_started\",\"time_unix\":15.0,\"stage\":\"pack\"}\n{\"event\":\"cancelled\",\"time_unix\":17.0,\"stage\":\"pack\"}\n").unwrap();
+        fs::write(dir.join("receipts/decode.json"), r#"{"wall_s":5.0}"#).unwrap();
+        let run = read_run(&dir).unwrap();
+        assert_eq!(run["status"], "cancelled");
+        assert_eq!(run["started"], 10.0);
+        assert_eq!(run["finished"], 17.0);
+        assert_eq!(run["stages"][0]["status"], "complete");
+        assert_eq!(run["stages"][0]["wall_s"], 5.0);
+        assert_eq!(run["stages"][1]["status"], "incomplete");
+        assert!(run["result"].is_null());
+        let _ = fs::remove_dir_all(dir);
     }
 }
