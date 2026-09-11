@@ -16,7 +16,7 @@ export function ProjectScreen(props: {
   path: string; settings: Settings; live: LiveRun | null; reloadKey: number;
   onBack: () => void; onSettings: () => void; onError: (m: string) => void;
   onStart: (project: Project, input: Input, options: Options) => Promise<void>;
-  onResume: (project: Project, run: Run) => Promise<void>;
+  onResume: (project: Project, run: Run, overrides?: Partial<Options>) => Promise<void>;
   onCancel: () => void;
   onOpenViewer: (focus?: string) => void;
 }) {
@@ -195,7 +195,7 @@ export function ProjectScreen(props: {
           )}
           {selectedRun && (
             <RunDetail run={selectedRun} live={liveHere?.job.output === selectedRun.path ? liveHere : null} project={project} busy={busy}
-              onCancel={props.onCancel} onResume={() => props.onResume(project, selectedRun)} onOpenViewer={props.onOpenViewer} onDelete={() => deleteRun(selectedRun)} />
+              onCancel={props.onCancel} onResume={overrides => props.onResume(project, selectedRun, overrides)} onOpenViewer={props.onOpenViewer} onDelete={() => deleteRun(selectedRun)} />
           )}
         </main>
       </div>
@@ -205,11 +205,26 @@ export function ProjectScreen(props: {
   );
 }
 
+/** Turn pipeline error text into something a person can act on. */
+export function explainError(message: string | null | undefined, memoryGb?: number): string {
+  if (!message) return '';
+  if (/RSS budget/i.test(message)) return `This step needed more memory than the run's limit${memoryGb ? ` of ${memoryGb} GB` : ''}. Raise the memory limit and resume; the finished steps are kept.`;
+  if (/Broken pipe/i.test(message)) return 'The app closed or restarted while processing was running. Resume to continue from the last finished step.';
+  if (/Resume requires identical/i.test(message)) return 'The scan, the options or the pipeline code changed since this run started, so it cannot be resumed. Start a new run.';
+  if (/Another processing job/i.test(message)) return 'Another run is already in progress. Wait for it to finish or cancel it.';
+  return message.replace(/^s20: /, '');
+}
+
 function NewRun({project, settings, busy, available, onAddInput, onStart}:
   {project: Project; settings: Settings; busy: boolean; available: Record<string, boolean>; onAddInput: () => void; onStart: (input: Input, options: Options) => Promise<void>}) {
   const key = `options:${project.path}`;
   const [options, setOptions] = useState<Options>(() => { try { return {...DEFAULT_OPTIONS, ...JSON.parse(localStorage.getItem(key) ?? '{}')}; } catch { return DEFAULT_OPTIONS; } });
   useEffect(() => { localStorage.setItem(key, JSON.stringify(options)); }, [key, options]);
+  // First time on this Mac: allow the pipeline about two thirds of installed memory.
+  useEffect(() => {
+    if (localStorage.getItem(key)) return;
+    api.hardware().then(h => setOptions(o => ({...o, memory_gb: Math.max(8, Math.round((h.memory_bytes / 1e9) * 0.65))}))).catch(() => {});
+  }, [key]);
   const [inputPath, setInputPath] = useState(project.inputs[project.inputs.length - 1]?.path ?? '');
   const input = project.inputs.find(i => i.path === inputPath) ?? project.inputs[project.inputs.length - 1];
   const [advanced, setAdvanced] = useState(false);
@@ -245,7 +260,7 @@ function NewRun({project, settings, busy, available, onAddInput, onStart}:
       <button className="link" onClick={() => setAdvanced(a => !a)} aria-expanded={advanced}>{advanced ? 'Hide advanced' : 'Advanced'}</button>
       {advanced && (
         <div className="advanced">
-          <label className="field inline"><span>Memory limit</span><span className="unit"><input type="number" min={1} max={1024} value={options.memory_gb} onChange={e => set({memory_gb: Math.max(1, Math.min(1024, +e.target.value || 1))})} /> GB</span></label>
+          <label className="field inline"><span>Memory limit<small style={{display: 'block'}}>A step that needs more is stopped so the Mac stays usable.</small></span><span className="unit"><input type="number" min={1} max={1024} value={options.memory_gb} onChange={e => set({memory_gb: Math.max(1, Math.min(1024, +e.target.value || 1))})} /> GB</span></label>
           <Toggle label="Refine poses" hint="Second pass that tightens the scan trajectory. Recommended." checked={options.pose_refinement} onChange={v => set({pose_refinement: v})} />
         </div>
       )}
@@ -261,8 +276,11 @@ function NewRun({project, settings, busy, available, onAddInput, onStart}:
 }
 
 function RunDetail({run, live, project, busy, onCancel, onResume, onOpenViewer, onDelete}:
-  {run: Run; live: LiveRun | null; project: Project; busy: boolean; onCancel: () => void; onResume: () => void; onOpenViewer: (focus: string) => void; onDelete: () => void}) {
+  {run: Run; live: LiveRun | null; project: Project; busy: boolean; onCancel: () => void; onResume: (overrides?: Partial<Options>) => void; onOpenViewer: (focus: string) => void; onDelete: () => void}) {
   const status = live ? live.status : run.status;
+  const rawError = live?.error ?? run.error;
+  const memoryError = /RSS budget/i.test(rawError ?? '');
+  const [memory, setMemory] = useState<number>(Math.round((run.options.memory_gb || 16) * 2));
   const input = project.inputs.find(i => i.path === run.capture);
   const stages = useMemo<StageState[]>(() => {
     const forecast = stagesFor(run.options).map(s => s.id);
@@ -295,7 +313,8 @@ function RunDetail({run, live, project, busy, onCancel, onResume, onOpenViewer, 
         </div>
         <div className="row">
           {(status === 'running' || status === 'starting') && <button className="danger" onClick={onCancel}><Square size={13} />Cancel</button>}
-          {resumable && <button className="primary" onClick={onResume}><Play size={14} />Resume</button>}
+          {resumable && memoryError && <label className="field inline resume-memory"><span>Memory limit</span><span className="unit"><input type="number" min={1} max={1024} value={memory} onChange={e => setMemory(Math.max(1, Math.min(1024, +e.target.value || 1)))} /> GB</span></label>}
+          {resumable && <button className="primary" onClick={() => onResume(memoryError ? {memory_gb: memory} : undefined)}><Play size={14} />Resume</button>}
           {!busy && status !== 'running' && <button onClick={onDelete}>Delete</button>}
         </div>
       </div>
@@ -305,7 +324,7 @@ function RunDetail({run, live, project, busy, onCancel, onResume, onOpenViewer, 
           <div className="row"><button onClick={() => api.reveal(result)}>Show in Finder</button><button className="primary" onClick={() => onOpenViewer(result)}>Open in viewer</button></div>
         </div>
       )}
-      <Pipeline stages={stages} status={status} startedAt={started} finishedAt={finished} error={live?.error ?? run.error} cpu={live?.cpu} memory={live?.memory}
+      <Pipeline stages={stages} status={status} startedAt={started} finishedAt={finished} error={explainError(rawError, run.options.memory_gb)} cpu={live?.cpu} memory={live?.memory}
         onShowLog={stage => api.readStageLog(run.path, stage)} />
     </div>
   );

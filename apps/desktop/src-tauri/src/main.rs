@@ -267,7 +267,7 @@ fn read_run(folder: &Path) -> Option<Value> {
         folder.join("geometry/filtered.ply")
     };
     let result_exists = result.is_file() && status == "completed";
-    let copy = read_json(&folder.join("copy.json"));
+    let copy = read_json(&folder.join("copy.json")).or_else(|| read_json(&folder.with_extension("copy.json")));
     let capture = copy.as_ref().and_then(|c| c["source"].as_str().map(|s| json!(s))).unwrap_or(job["capture"].clone());
     Some(json!({
         "path": folder,
@@ -674,6 +674,9 @@ fn start_job(
     std::thread::spawn(move || {
         let state = app.state::<Engine>();
         if let Some(dir) = &temp {
+            // The run folder is created by the pipeline itself, so the copy
+            // record lives next to it until the run folder exists.
+            let _ = write_json(&Path::new(&output).with_extension("copy.json"), &json!({"source": source, "temp": effective.capture}));
             if let Err(e) = copy_scan(&app, &state, &source, dir, &run_id) {
                 let cancelled = e == "cancelled";
                 let _ = app.emit("pipeline-event", json!({"event": if cancelled { "cancelled" } else { "failed" }, "stage": "copy", "run_id": run_id, "message": if cancelled { "Copy cancelled".to_string() } else { format!("Copying the scan failed: {e}") }, "time_unix": now()}));
@@ -721,8 +724,10 @@ fn start_job(
         state.pid.store(0, Ordering::SeqCst);
         state.running.store(false, Ordering::SeqCst);
         if temp.is_some() {
-            // Record the copy so run history and resume know the real source.
+            // Move the copy record into the run folder now that it exists.
+            let sidecar = Path::new(&output).with_extension("copy.json");
             let _ = write_json(&Path::new(&output).join("copy.json"), &json!({"source": source, "temp": effective.capture}));
+            let _ = fs::remove_file(sidecar);
             if code == 0 { remove_temp_copy(&app, &output, &source.to_string_lossy()); }
         }
         let _ = app.emit("job-exit", json!({"run_id":run_id,"code":code}));

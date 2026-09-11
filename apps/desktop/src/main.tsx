@@ -19,6 +19,9 @@ export type LiveRun = {
 };
 type Screen = {kind: 'projects'} | {kind: 'project'; path: string} | {kind: 'viewer'; path: string; focus?: string};
 
+/** Module-level copy of the live run so a remount (hot reload, error boundary) does not lose it. */
+let liveSnapshot: LiveRun | null = null;
+
 function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [screen, setScreen] = useState<Screen>(() => {
@@ -30,9 +33,10 @@ function App() {
     const last = localStorage.getItem('lastProject');
     return last ? {kind: 'project', path: last} : {kind: 'projects'};
   });
-  const [live, setLive] = useState<LiveRun | null>(null);
+  const [live, setLive] = useState<LiveRun | null>(() => liveSnapshot);
   const liveRef = useRef<LiveRun | null>(null);
   liveRef.current = live;
+  liveSnapshot = live;
   const [error, setError] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -96,8 +100,8 @@ function App() {
     const job: Job = {...options, copy: !!input.copy, capture: input.path, output: `${project.path}/runs/${runFolderName()}`, resume: false};
     await launch(project.path, job);
   }
-  async function resumeRun(project: Project, run: Run) {
-    const job: Job = {...run.options, copy: !!run.options.copy, capture: run.capture, output: run.path, resume: true};
+  async function resumeRun(project: Project, run: Run, overrides: Partial<Options> = {}) {
+    const job: Job = {...run.options, ...overrides, copy: !!run.options.copy, capture: run.capture, output: run.path, resume: true};
     await launch(project.path, job, run);
   }
   async function launch(projectPath: string, job: Job, previous?: Run) {

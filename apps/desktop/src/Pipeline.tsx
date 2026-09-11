@@ -82,6 +82,7 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
         </div>
         <time>{duration(elapsed)}</time>
       </div>
+      {error && !stages.some(x => x.status === 'failed' || x.status === 'cancelled' || x.status === 'incomplete') && <div className="step-error top">{error}</div>}
       <div className="steps" ref={list} onWheel={() => { userScrolled.current = true; }} onTouchMove={() => { userScrolled.current = true; }}>
         {stages.map((s, i) => {
           const group = groupOf(s.id);

@@ -52,12 +52,23 @@ def stop(child):
         child.wait()
 
 
+RESOURCE_OPTIONS = ("memory_gb", "cpu_threads", "color_workers", "resources", "chunk_points")
+
+
+def resume_identity(job):
+    """Everything that determines outputs. Resource limits only change speed and may differ on resume."""
+    options = {k: v for k, v in job["options"].items() if k not in RESOURCE_OPTIONS}
+    return {**job, "options": options}
+
+
 def _run(job, resume=False):
     out = Path(job["output"])
     receipt = out / "job.json"
     if resume:
-        if not receipt.is_file() or json.loads(receipt.read_text()) != job:
+        previous = json.loads(receipt.read_text()) if receipt.is_file() else None
+        if previous is None or resume_identity(previous) != resume_identity(job):
             raise ValueError("Resume requires identical inputs, options, code and binaries")
+        atomic_json(receipt, job)
     else:
         atomic_json(receipt, job)
     (out / "receipts").mkdir(exist_ok=True)
