@@ -102,3 +102,19 @@ Performance was measured in separate processes on the Apple M4 Max. Inputs were 
 Metal reduces median wall time by **26.1%** (`1.353×`) and process CPU time by **34.9%**. Median sampled RSS increases by 236 MB, or **8.37%**. The speedup is mostly lower CPU array work rather than kernel execution; with only about 0.572 seconds in GPU commands, more kernel tuning has little remaining leverage on this scan. Higher-value future work is reducing CPU candidate packing/temporary traffic and bounding retained buffers on large clouds.
 
 Regression fixtures cover equal-depth ties, neighborhood edges, near-axis projection, integer mask boundaries, empty/reused selections, every visibility threshold, large exactly representable coordinates, conditioned plane intersections and sub-threshold camera-center rounding. No full garden timing or memory validation was performed. The collector requires macOS 15 and Metal language 3.2; use `--collector cpu` on unsupported systems or when exact downstream color reproduction is required.
+
+
+## CPU collector memory and depth parallelism, 12 September 2026
+
+The exact CPU path now releases the source PLY mapping after copying geometry, creates the sparse observation file without eagerly dirtying every page, stores the voxel permutation and leaf starts as `uint32` when the point count permits, and gathers sparse voxel selections without allocating a full-cloud boolean mask. Projection and packed-depth construction use up to four fixed worker stripes with private depth images under a 128 MiB scratch budget; the images are merged only after all stripes finish. Point order, packed depth/ID ties, visibility arithmetic and candidate replacement order are unchanged.
+
+The frozen indoor scan was warmed, then the previous and changed collectors were alternated three times in separate processes. Each run used 6,136,485 points, 62 photos, eight color workers and 262,144-point chunks. RSS was sampled every 0.5 seconds.
+
+| Collector | Candidate-stage wall samples | Median wall | Median sampled RSS |
+|---|---|---:|---:|
+| Previous CPU | 23.948 s, 24.390 s, 25.366 s | 24.390 s | 2.808 GB |
+| Changed CPU | 18.014 s, 18.712 s, 19.337 s | 18.712 s | 2.537 GB |
+
+This is a **23.3% wall-time reduction** (`1.303×`) and a **9.7% RSS reduction** (about 271 MB). All three changed observation files passed `cmp` against the frozen golden file. A separate full first-photo diagnostic over all 6,136,485 points found zero differences in projection validity, packed depth keys, exact winners, neighborhood blockers, reliability/surface decisions or final visibility. The lightweight suite passed 42 tests with 8 Metal/native tests skipped in the isolated worktree.
+
+This change does not meet the later fivefold candidate-stage target. Against the 24.390-second previous median, that target requires an end-to-end result at or below 4.878 seconds on the same frozen input. Further work must reduce projection/visibility/ranking traffic rather than treating parallel depth construction alone as the final design.

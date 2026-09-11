@@ -30,10 +30,14 @@ class PhotoPointIndex:
                 :, 2
             ]
         self.order = np.argsort(keys, kind="stable")
+        if self.count <= np.iinfo(np.uint32).max:
+            self.order = self.order.astype(np.uint32)
         keys = keys[self.order]
-        starts = np.r_[0, np.flatnonzero(keys[1:] != keys[:-1]) + 1]
-        self.counts = np.diff(np.r_[starts, len(xyz)])
-        occupied = keys[starts]
+        self.starts = np.r_[0, np.flatnonzero(keys[1:] != keys[:-1]) + 1]
+        self.counts = np.diff(np.r_[self.starts, len(xyz)])
+        if self.count <= np.iinfo(np.uint32).max:
+            self.starts = self.starts.astype(np.uint32)
+        occupied = keys[self.starts]
         cells = np.column_stack(np.unravel_index(occupied, shape))
         self.centers = (cells + lower + 0.5) * voxel_size
 
@@ -123,10 +127,24 @@ class PhotoPointIndex:
         if self.order is None:
             return None
         keep = self.visible_voxels(frame)
+        selected_count = int(self.counts[keep].sum())
         # A compact indoor cloud often fits almost entirely in the halo. Avoid
         # gathering/copying it when culling would save fewer than 10% of points.
-        if self.counts[keep].sum() >= 0.9 * self.count:
+        if selected_count >= 0.9 * self.count:
             return None
+        if selected_count <= self.count // 4:
+            # Sparse views need only their selected IDs, not a full-cloud mask.
+            # Broader views retain the linear mask path to avoid a large sort.
+            selected = np.empty(selected_count, dtype=self.order.dtype)
+            cursor = 0
+            for leaf in np.flatnonzero(keep):
+                start = int(self.starts[leaf])
+                count = int(self.counts[leaf])
+                selected[cursor : cursor + count] = self.order[start : start + count]
+                cursor += count
+            # Every ID is unique; ascending order exactly matches flatnonzero.
+            selected.sort()
+            return selected
         selected = np.empty(self.count, dtype=bool)
         selected[self.order] = np.repeat(keep, self.counts)
         return np.flatnonzero(selected)

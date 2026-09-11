@@ -82,7 +82,37 @@ def test_dense_view_uses_contiguous_path():
     assert PhotoPointIndex(xyz).point_ids(frame()) is None
 
 
-def test_collector_matches_unculled_with_masks_ties_and_chunk_boundaries(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kept_cells", [[], [2, 4], [1, 4], [1, 5], [0, 1, 3, 4, 5, 6]])
+def test_compact_index_preserves_ids_across_selection_paths(monkeypatch, kept_cells):
+    # Unequal leaf sizes and interleaved original IDs exercise both range ends
+    # and restoration of original point order, including the 25% boundary.
+    cells = np.repeat(np.arange(8), [1, 7, 2, 10, 3, 5, 8, 4])
+    cells = cells[np.random.default_rng(181).permutation(len(cells))]
+    xyz = np.column_stack([cells * 10, np.zeros(len(cells)), np.ones(len(cells))]).astype(
+        "f4"
+    )
+    index = PhotoPointIndex(xyz, chunk=7)
+    assert index.order.dtype == np.dtype("uint32")
+    assert index.order.nbytes == 4 * len(xyz)
+    assert index.starts.dtype == np.dtype("uint32")
+    assert index.starts.nbytes == 4 * len(index.counts)
+    keep = np.isin(np.arange(8), kept_cells)
+    monkeypatch.setattr(index, "visible_voxels", lambda camera: keep)
+    expected = np.flatnonzero(np.isin(cells, kept_cells))
+    actual = index.point_ids(frame())
+    np.testing.assert_array_equal(actual, expected)
+    assert np.all(np.diff(actual.astype("i8")) > 0)
+    if len(expected) <= len(xyz) // 4:
+        assert actual.dtype == np.dtype("uint32")
+        assert actual.nbytes == 4 * len(expected)
+    else:
+        assert actual.dtype == np.dtype(np.intp)
+
+
+@pytest.mark.parametrize("focal_scale", [1, 4])
+def test_collector_matches_unculled_with_masks_ties_and_chunk_boundaries(
+    tmp_path, monkeypatch, focal_scale
+):
     from PIL import Image
 
     import s20_pipeline.collect as module
@@ -98,6 +128,15 @@ def test_collector_matches_unculled_with_masks_ties_and_chunk_boundaries(tmp_pat
     for i, key in enumerate(points.dtype.names):
         points[key] = np.column_stack([xyz, normals])[:, i]
     frames = []
+    camera = frame()
+    camera = replace(
+        camera,
+        calibration=replace(
+            camera.calibration,
+            a11=camera.calibration.a11 * focal_scale,
+            a22=camera.calibration.a22 * focal_scale,
+        ),
+    )
     mask_root = tmp_path / "masks"
     (mask_root / "left_mask").mkdir(parents=True)
     for i in range(7):
@@ -108,7 +147,7 @@ def test_collector_matches_unculled_with_masks_ties_and_chunk_boundaries(tmp_pat
         Image.fromarray(mask).save(mask_root / "left_mask" / image.name)
         frames.append(
             replace(
-                frame(),
+                camera,
                 image_path=image,
                 center=np.array([i * 3.0, 0, 0]) if i < 6 else np.array([0.0, 0.0, 200.0]),
             )
@@ -130,6 +169,8 @@ def test_collector_matches_unculled_with_masks_ties_and_chunk_boundaries(tmp_pat
     assert progress == [(i, 7) for i in range(1, 8)]
     meta = json.loads((tmp_path / "culled/candidates/meta.json").read_text())
     assert meta["images"][-1]["projected_points"] == 0
+    if focal_scale == 4:
+        assert 0 < meta["images"][0]["projected_points"] <= len(xyz) // 4
 
     class AllPoints:
         def __init__(self, xyz, **kwargs):

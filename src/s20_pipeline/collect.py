@@ -15,6 +15,92 @@ RELIABLE = np.uint32(2)
 SURFACE_REJECTED = np.uint32(4)
 VISIBLE = np.uint32(8)
 
+CPU_DEPTH_SCRATCH_BUDGET = 128 << 20
+CPU_PROJECT_SCRATCH_BYTES_PER_POINT = 128
+
+
+def _load_geometry_arrays(geometry):
+    points = map_points(read_ply_info(geometry))
+    try:
+        xyz = np.column_stack([points[k] for k in ("x", "y", "z")])
+        normals = np.column_stack([points[k] for k in ("normal_x", "normal_y", "normal_z")])
+    finally:
+        # column_stack owns its data; no field views escape this scope. Closing
+        # the source mapping releases its resident pages before collection.
+        if isinstance(points, np.memmap):
+            points._mmap.close()
+    return xyz, normals
+
+
+def _empty_observations(path, count, candidates):
+    shape = (count, candidates, 8)
+    # A newly created, truncated regular file reads as zero without eagerly
+    # dirtying every mapped page. Never reuse an existing candidate file.
+    with path.open("xb") as stream:
+        stream.truncate(count * candidates * 8 * np.dtype("float32").itemsize)
+    return np.memmap(path, dtype="float32", mode="r+", shape=shape)
+
+
+def _depth_worker_count(count, chunk, workers, depth_bytes):
+    if count == 0:
+        return 0
+    # Estimate concurrent NumPy scratch as well as private depth images; this
+    # is not a cap on total process RSS. The one-worker baseline is required
+    # even if one image exceeds this budget.
+    estimated_scratch = depth_bytes + min(count, chunk) * CPU_PROJECT_SCRATCH_BYTES_PER_POINT
+    return min(
+        workers,
+        4,
+        (count + chunk - 1) // chunk,
+        max(1, CPU_DEPTH_SCRATCH_BUDGET // estimated_scratch),
+    )
+
+
+def _cpu_projection_depth(xyz, frame, selected, projection, depth_id, chunk, workers, executor):
+    """Project fixed chunks in parallel, then merge exact per-worker depth minima."""
+    n = len(xyz)
+    count = n if selected is None else len(selected)
+    worker_count = _depth_worker_count(count, chunk, workers, depth_id.nbytes)
+    cal = frame.calibration
+    width = (cal.width + 3) // 4
+    sentinel = np.iinfo(np.int64).max
+
+    def project_stripe(worker):
+        local_depth = depth_id if worker == 0 else np.full_like(depth_id, sentinel)
+        for start in range(worker * chunk, count, worker_count * chunk):
+            end = min(count, start + chunk)
+            point_chunk = slice(start, end) if selected is None else selected[start:end]
+            u, v, angle, d = project(xyz[point_chunk], frame)
+            projection[start:end] = np.column_stack([u, v, angle, d])
+            valid = (
+                (d > 0.1)
+                & np.isfinite(u)
+                & np.isfinite(v)
+                & (u >= 0)
+                & (v >= 0)
+                & (u < cal.width - 1)
+                & (v < cal.height - 1)
+                & (angle < np.deg2rad(cal.max_incident_angle_deg))
+            )
+            ids = np.flatnonzero(valid) + start if selected is None else selected[start:end][valid]
+            pix = v[valid].astype("int32") // 4 * width + u[valid].astype("int32") // 4
+            quant = np.rint(d[valid] * 1e6).astype("int64")
+            if len(ids):
+                if int(quant.max()) >= (sentinel - n) // n:
+                    raise ValueError("Scene exceeds int64 depth encoding range")
+                np.minimum.at(local_depth, pix, quant * n + ids)
+        return local_depth
+
+    if worker_count == 1:
+        project_stripe(0)
+    elif worker_count > 1:
+        # At most four tasks/maps are live. All workers finish before merging
+        # into worker zero's map or beginning any visibility/color work.
+        depths = list(executor.map(project_stripe, range(worker_count)))
+        for local_depth in depths[1:]:
+            np.minimum(depth_id, local_depth, out=depth_id)
+    return worker_count
+
 
 def minimum_depth_keys(a, radius=3):
     """Exact integer separable minimum; never converts packed IDs to double."""
@@ -176,10 +262,8 @@ def collect(
     CHUNK = chunk
     dest = output / "candidates"
     dest.mkdir(parents=True, exist_ok=False)
-    p = map_points(read_ply_info(geometry))
-    xyz = np.column_stack([p[k] for k in ["x", "y", "z"]])
-    normals = np.column_stack([p[k] for k in ["normal_x", "normal_y", "normal_z"]])
-    n = len(p)
+    xyz, normals = _load_geometry_arrays(geometry)
+    n = len(xyz)
     if n == 0 or not np.isfinite(xyz).all() or not np.isfinite(normals).all():
         raise ValueError("Empty or nonfinite geometry")
     point_index = PhotoPointIndex(xyz, chunk=CHUNK)
@@ -193,8 +277,7 @@ def collect(
         all_point_ids = np.arange(n, dtype="uint32")
     else:
         all_point_ids = None
-    c = np.memmap(dest / "observations.bin", dtype="float32", mode="w+", shape=(n, K, 8))
-    c[:] = 0
+    c = _empty_observations(dest / "observations.bin", n, K)
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -208,11 +291,12 @@ def collect(
             cal = f.calibration
             w = (cal.width + 3) // 4
             h = (cal.height + 3) // 4
-            depth_id = np.full(w * h, sentinel, dtype="int64")
+            depth_id = None
             # All potentially visible voxels contribute before ANY points are colored.
             # Point chunks therefore cannot hide occluders in other chunks.
             selected_ids = None
             metal_result = None
+            depth_workers = 0
             if metal is not None:
                 selected_ids = (
                     all_point_ids if selected is None else np.asarray(selected, dtype="uint32")
@@ -232,33 +316,11 @@ def collect(
                         diagnostic_difference(reference, candidate, selected_ids, f.image_path)
                     )
             else:
+                depth_id = np.full(w * h, sentinel, dtype="int64")
                 projection = np.empty((count, 4), dtype="float32")
-                for start in range(0, count, CHUNK):
-                    end = min(count, start + CHUNK)
-                    point_chunk = slice(start, end) if selected is None else selected[start:end]
-                    u, v, angle, d = project(xyz[point_chunk], f)
-                    projection[start:end] = np.column_stack([u, v, angle, d])
-                    valid = (
-                        (d > 0.1)
-                        & np.isfinite(u)
-                        & np.isfinite(v)
-                        & (u >= 0)
-                        & (v >= 0)
-                        & (u < cal.width - 1)
-                        & (v < cal.height - 1)
-                        & (angle < np.deg2rad(cal.max_incident_angle_deg))
-                    )
-                    ids = (
-                        np.flatnonzero(valid) + start
-                        if selected is None
-                        else selected[start:end][valid]
-                    )
-                    pix = v[valid].astype("int32") // 4 * w + u[valid].astype("int32") // 4
-                    quant = np.rint(d[valid] * 1e6).astype("int64")
-                    if len(ids):
-                        if int(quant.max()) >= (sentinel - n) // n:
-                            raise ValueError("Scene exceeds int64 depth encoding range")
-                        np.minimum.at(depth_id, pix, quant * n + ids)
+                depth_workers = _cpu_projection_depth(
+                    xyz, f, selected, projection, depth_id, CHUNK, workers, executor
+                )
                 filled = minimum_depth_keys(depth_id.reshape(h, w)).ravel()
                 if diagnostics and backend == "cpu_float32":
                     selected_ids = (
@@ -391,6 +453,10 @@ def collect(
                 {
                     "image": str(f.image_path),
                     "projected_points": count,
+                    "cpu_depth_workers": depth_workers,
+                    "cpu_depth_buffer_bytes": max(1, depth_workers) * depth_id.nbytes
+                    if depth_id is not None
+                    else 0,
                     "inserted": inserted,
                     "surface_patch_rejections": rejected,
                     "projection_cpu_rechecks": metal_result.projection_rechecks
@@ -404,6 +470,8 @@ def collect(
                     else 0,
                 }
             )
+            with (dest / "photo-progress.jsonl").open("a") as stream:
+                stream.write(json.dumps(rows[-1]) + "\n")
             progress(index + 1, len(fs))
     for start in range(0, n, CHUNK):
         part = c[start : start + CHUNK]
