@@ -293,22 +293,23 @@ def visibility_decisions(xyz, normals, ids, d, blocker, exact_keys, point_count,
     center32 = frame.center.astype("float32")
     ray = (xyz[ids] - center32) / d[:, None]
     bn = normals[blocker]
+    blocker_xyz = xyz[blocker]
     denom = np.einsum("ij,ij->i", bn, ray)
     if precision == "float32":
         center = center32
-        plane_depth = np.einsum("ij,ij->i", bn, xyz[blocker] - center) / np.where(
+        plane_depth = np.einsum("ij,ij->i", bn, blocker_xyz - center) / np.where(
             abs(denom) > np.float32(0.05), denom, np.float32(1)
         )
         hit = center + ray * plane_depth[:, None]
-        patch_distance = np.linalg.norm(hit - xyz[blocker], axis=1)
+        patch_distance = np.linalg.norm(hit - blocker_xyz, axis=1)
         exact_depth = (exact_keys // point_count).astype("float32") * np.float32(1e-6)
     elif precision == "mixed":
         center = frame.center
-        plane_depth = np.einsum("ij,ij->i", bn, xyz[blocker] - center) / np.where(
+        plane_depth = np.einsum("ij,ij->i", bn, blocker_xyz - center) / np.where(
             abs(denom) > 0.05, denom, 1
         )
         hit = center + ray * plane_depth[:, None]
-        patch_distance = np.linalg.norm(hit - xyz[blocker], axis=1)
+        patch_distance = np.linalg.norm(hit - blocker_xyz, axis=1)
         exact_depth = (exact_keys // point_count) / 1e6
     else:
         raise ValueError(f"Unknown visibility precision: {precision}")
@@ -620,8 +621,6 @@ def collect(
                 ids = ids[usable]
                 u = u[usable]
                 v = v[usable]
-                x = x[usable]
-                y = y[usable]
                 if metal_result is not None:
                     ray = (xyz[ids] - f.center.astype("float32")) / d[usable, None]
                     incidence_for_score = np.einsum("ij,ij->i", normals[ids], -ray)
