@@ -27,7 +27,7 @@ cd /tmp/s20-next
 /opt/homebrew/bin/cmake --build build -j 8 --target s20_reconstruct s20_geometry
 ```
 
-Syntax-check `geometry.mm` quickly with `clang++ -x objective-c++ -std=c++20 -fobjc-arc -fsyntax-only native/geometry.mm`. The main checkout's `build/` is already configured; `/opt/homebrew/bin/cmake --build build -j 8` there rebuilds the real binaries after merging. Python: `.venv/bin/python -m pytest -q` (17 tests, under a second; GPU parity tests run when binaries exist), `.venv/bin/python -m ruff check --fix` and `ruff format` before committing. `build/s20_geometry --self-test --kernels native/geometry.metal` must pass.
+Syntax-check `geometry.mm` quickly with `clang++ -x objective-c++ -std=c++20 -fobjc-arc -fsyntax-only native/geometry.mm`. The main checkout's `build/` is already configured; `/opt/homebrew/bin/cmake --build build -j 8` there rebuilds the real binaries after merging. Python: `.venv/bin/python -m pytest -q` (24 tests, around a second; GPU parity tests run when binaries exist), `.venv/bin/python -m ruff check --fix` and `ruff format` before committing. `build/s20_geometry --self-test --kernels native/geometry.metal` must pass.
 
 ## Benchmark inputs and method
 
@@ -74,18 +74,22 @@ Small scan end to end: 157 s before, 92 s now. Details in `docs/PERFORMANCE.md`.
 
 Do them in this order. Each is independent; validate and commit each one separately.
 
-### 1. Cull points per photo in the color collector (largest win)
+### 1. Cull points per photo in the color collector — DONE (11 September 2026)
 
-File: `src/s20_pipeline/collect.py`, function `collect`. Today the loop `for index, f in enumerate(fs)` projects **all n points into every photo** twice: once to build the photo's depth buffer (`depth_id`, quarter resolution, `np.minimum.at` of packed depth and point id) and once in `color_chunk` per 262,144-point chunk. On the big scan that is 122 M × 1,094 projections per pass.
+**Completed and validated.** The user selected the small indoor scan as the benchmark instead of a full large-scan run. The original and optimized `observations.bin` files pass `cmp`; direct collection measured **23.76 s before → 22.92 s after**, with sampled peak RSS **2.65 GB → 2.97 GB**. This compact scan takes the contiguous full-cloud fallback, so the timing difference is not evidence of a substantial culling speedup. A fresh full pipeline run exported exactly **6,024,829 colored points**. All **24 tests** and the Metal geometry self-test passed. A separate six-photo large-cloud diagnostic also produced byte-identical observations. The full large benchmark was stopped at the user's request; no full large-scan timing or 10–50× speedup is claimed. See `docs/PERFORMANCE.md` for details.
+
+Implementation notes: the current collector already caches projections, so it projects once per photo rather than twice. It has a minimum distance (`d > 0.1`) but **no maximum range**; adding a far cutoff would change candidates. The implementation preserves this unlimited range. Its 2 m voxel index bounds all eight corners with a one-voxel halo, then uses conservative interval bounds through the fisheye polynomial and image rectangle. Testing only whether individual corners project inside the image is not conservative. Original point IDs, packed depth ties, the candidate layout and progress calls are preserved.
+
+File: `src/s20_pipeline/collect.py`, function `collect`. Before this task, the loop `for index, f in enumerate(fs)` projected **all n points into every photo**, cached the projection to build the photo's depth buffer (`depth_id`, quarter resolution, `np.minimum.at` of packed depth and point id), and reused it in `color_chunk` per 262,144-point chunk. On the big scan that was 122 M × 1,094 projections.
 
 Plan:
 
 - Once, before the photo loop, bucket points into a coarse grid (2 m voxels is plenty): `np.floor(xyz / 2)` → sort indices by voxel key, keep voxel bounds. Memory is one int64 per point plus the permutation.
-- Per photo, test each voxel's 8 corners against the camera frustum and a maximum range (the collector already limits by `d`; use the same limit) and take only points of voxels that pass. Then project only those for the depth buffer and for coloring.
-- The depth buffer must still see every point that could occlude, so the frustum test must be conservative (expand by one voxel). Because a culled point could not have projected into the image, the depth buffer and the chosen candidates are unchanged.
+- Per photo, conservatively bound each voxel's 8 corners against the fisheye image and take only points of voxels that pass. Keep the existing `d > 0.1` test; there is no maximum range to reuse. Then project only those for the depth buffer and for coloring.
+- The depth buffer must still see every point that could occlude, so the frustum test must be conservative (expand by one voxel and bound the full box, not just individual projected corners). Because a culled point could not have projected into the image, the depth buffer and the chosen candidates are unchanged.
 - Keep `observations.bin` layout (`n × 4 × 8` float32) and the progress calls untouched; `blend.mm` reads that file.
 
-Validate on the small scan: `observations.bin` must be byte-identical before and after (`cmp`). Then run the big scan's candidates stage and record the time. Expect 10 to 50 times faster.
+Validation: use the small scan as the acceptance and performance benchmark, per the user's updated instruction. `observations.bin` must be byte-identical before and after (`cmp`), and the full pipeline must preserve the exported colored-point count. The original proposed large-scan benchmark and 10–50× speedup expectation are superseded.
 
 ### 2. Metal projection and depth test for the collector
 

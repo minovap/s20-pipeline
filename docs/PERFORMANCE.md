@@ -17,13 +17,13 @@ Earlier visibility color took 42.20 s; the eight-worker optimization preserved e
 
 ## Larger scans
 
-Current candidate storage is 128 bytes per geometry point. At 5.1 million points it is about 652 MB; at 20× it is about 13.0 GB. Geometry, normals, full-image projection and temporary arrays add memory. Disk-backed candidates bound one allocation, not the entire pipeline.
+Current candidate storage is 128 bytes per geometry point. At 5.1 million points it is about 652 MB; at 20× it is about 13.0 GB. Geometry, normals, the voxel index, per-photo projection and temporary arrays add memory. Disk-backed candidates bound one allocation, not the entire pipeline.
 
-More seriously, projection is currently O(points × selected photos). If both grow 5×, the work can grow 25×; at 20×, 400×. Do not extrapolate the 25.20-second color stage linearly or promise that more cores solve this.
+Projection now uses a conservative 2 m voxel index per photo. Its cost follows the points in the retained fisheye bounds; worst-case views still project the entire cloud. If points and selected photos both grow 5×, the work can still grow 25×; at 20×, 400×. Do not extrapolate the 25.20-second color stage linearly or promise that more cores solve this.
 
 Prioritized improvements:
 
-1. **Spatial photo selection.** Build a camera/scene spatial index and conservative fisheye view bounds. Consider only cameras that can see each tile. Preserve occluders outside the tile through full-frustum depth or an appropriate halo; a color chunk alone cannot define visibility. Validate candidate identity/quality on occlusion boundaries.
+1. **Spatial photo selection — implemented.** A sorted 2 m point-voxel index bounds the complete polynomial fisheye image with a one-voxel halo. Both depth and color passes use the retained points, preserving all possible occluders and original point-ID ties. Views retaining at least 90% of points use contiguous full-cloud slices to avoid gather overhead. There is no maximum-distance cutoff in the existing collector, so none was added. The small-scan observations are byte-identical; see the measurements below.
 2. **GPU projection and depth reduction.** Project points, reject invalid/masked pixels, build nearest-depth buffers and rank views in Metal. These independent point operations are the main remaining acceleration opportunity. Preserve deterministic packed depth/ID ties; query integer-atomic capabilities, or use a two-pass minimum reduction if required. Compare all records to CPU references.
 3. **Streaming geometry and observations.** Decode and process frame windows, spill observation tiles, avoid loading the entire raw recording into the C++ front end. Bound map/submap lifetime. Existing tracking is sequential across time; parallelize registration residuals and local reductions rather than independent time chunks with no pose continuity.
 4. **Overlap useful work.** Decode/transform the next photo while inference runs, pipeline file reads with CPU work, and process independent pose residuals/geometry blocks in parallel. Budget all work against unified memory; benchmark with and without overlap.
@@ -53,3 +53,22 @@ An 18-minute garden capture (10,972 frames, 160 M registered points, 1,094 photo
 The small indoor test scan (671 frames, 12.5 M points) is unchanged in time and slightly lower in memory; the fixes only matter when the cloud is large.
 
 Not changed: registration itself, the per-block density kd-tree in geometry (43 s here, single threaded), and the 50 m subfile size.
+
+
+## Collector voxel culling, 11 September 2026
+
+At the user's request, the small indoor scan is the acceptance and performance benchmark. The full garden candidates benchmark was stopped; no full garden timing or 10–50× speedup is claimed.
+
+Task 1 uses conservative 2 m voxel bounds for the existing fisheye projection. It preserves the full-image depth buffer, original point IDs, exact depth ties, candidate record layout and progress calls. The original collector already cached projections and had no maximum range; neither an extra projection pass nor a far clipping plane was removed.
+
+Sequential direct collector runs on the M4 Max, eight color workers and 262,144-point chunks, with process RSS sampled every 0.5 s:
+
+| Input | Before | After | Validation |
+|---|---:|---:|---|
+| Indoor scan: 6,136,485 points, 62 photos | 23.76 s; 2.65 GB peak RSS | 22.92 s; 2.97 GB peak RSS | `cmp` passed for all observations. The dense-view fallback projects the full cloud here; this small timing difference is not evidence of a substantial speedup. |
+
+The indoor candidate SHA-256 is `48f0dee4f5f4e1ada3dbc39ff915c2d3bd23d97d68bb9b7ca48f668e0b2c0d37` before and after. A fresh raw-to-export indoor run retained exactly **6,024,829 colored points**. All 24 tests and the native Metal geometry self-test passed. Regression coverage includes arbitrary rotations, nonmonotonic distortion, image intersections without visible voxel corners, distant points, masks, empty views, depth ties and occluders across chunk boundaries.
+
+An additional six-photo comparison on all **121,379,229 garden points** also passed `cmp`. The culled path projected 511,417,663 point/photo pairs versus 728,275,374 without culling. Profiling placed voxel selection around 0.19 s per photo; these broad initial views retain roughly two-thirds of the cloud. The profiled six-photo runs took 57.59 s with culling and 53.13 s without, including one-time index construction and sorting/writing the entire 15.5 GB observation file. These short profiled runs are parity diagnostics, not full-scan speedup measurements.
+
+The garden geometry was regenerated from the preserved registered frames because the historical large filtered cloud was unavailable. It contains 121,379,229 kept points, 13,963,472 noise points and 30 ray subfiles; do not equate it with the historical 121,778,659-point output. The collector optimization changes no geometry code.

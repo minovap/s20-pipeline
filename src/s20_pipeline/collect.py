@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 from .camera import load_camera_frames, project
+from .frustum import PhotoPointIndex
 from .ply import map_points, read_ply_info
 from .storage import digest
 
@@ -49,24 +50,28 @@ def collect(
     n = len(p)
     if n == 0 or not np.isfinite(xyz).all() or not np.isfinite(normals).all():
         raise ValueError("Empty or nonfinite geometry")
+    point_index = PhotoPointIndex(xyz, chunk=CHUNK)
     c = np.memmap(dest / "observations.bin", dtype="float32", mode="w+", shape=(n, K, 8))
     c[:] = 0
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        projection = np.empty((n, 4), dtype="float32")
         rows = []
         sentinel = np.iinfo(np.int64).max
         for index, f in enumerate(fs):
+            selected = point_index.point_ids(f)
+            count = n if selected is None else len(selected)
+            projection = np.empty((count, 4), dtype="float32")
             cal = f.calibration
             w = (cal.width + 3) // 4
             h = (cal.height + 3) // 4
             depth_id = np.full(w * h, sentinel, dtype="int64")
-            # All points contribute to the image depth buffer before ANY are colored.
+            # All potentially visible voxels contribute before ANY points are colored.
             # Point chunks therefore cannot hide occluders in other chunks.
-            for start in range(0, n, CHUNK):
-                end = min(n, start + CHUNK)
-                u, v, angle, d = project(xyz[start:end], f)
+            for start in range(0, count, CHUNK):
+                end = min(count, start + CHUNK)
+                point_chunk = slice(start, end) if selected is None else selected[start:end]
+                u, v, angle, d = project(xyz[point_chunk], f)
                 projection[start:end] = np.column_stack([u, v, angle, d])
                 valid = (
                     (d > 0.1)
@@ -78,7 +83,11 @@ def collect(
                     & (v < cal.height - 1)
                     & (angle < np.deg2rad(cal.max_incident_angle_deg))
                 )
-                ids = np.flatnonzero(valid) + start
+                ids = (
+                    np.flatnonzero(valid) + start
+                    if selected is None
+                    else selected[start:end][valid]
+                )
                 pix = v[valid].astype("int32") // 4 * w + u[valid].astype("int32") // 4
                 quant = np.rint(d[valid] * 1e6).astype("int64")
                 if len(ids):
@@ -98,7 +107,7 @@ def collect(
                 raise ValueError("Image/mask dimensions do not match calibration")
 
             def color_chunk(start):
-                end = min(n, start + CHUNK)
+                end = min(count, start + CHUNK)
                 u, v, angle, d = projection[start:end].T
                 valid = (
                     (d > 0.1)
@@ -110,7 +119,11 @@ def collect(
                     & (v < cal.height - 1)
                     & (angle < np.deg2rad(cal.max_incident_angle_deg))
                 )
-                ids = np.flatnonzero(valid) + start
+                ids = (
+                    np.flatnonzero(valid) + start
+                    if selected is None
+                    else selected[start:end][valid]
+                )
                 u = u[valid]
                 v = v[valid]
                 d = d[valid]
@@ -183,12 +196,13 @@ def collect(
                 c[ids, slot, 7] = score
                 return len(ids), rejected_chunk
 
-            totals = list(executor.map(color_chunk, range(0, n, CHUNK)))
+            totals = list(executor.map(color_chunk, range(0, count, CHUNK)))
             inserted = sum(t[0] for t in totals)
             rejected = sum(t[1] for t in totals)
             rows.append(
                 {
                     "image": str(f.image_path),
+                    "projected_points": count,
                     "inserted": inserted,
                     "surface_patch_rejections": rejected,
                 }
@@ -211,7 +225,7 @@ def collect(
                 "input_sha256": digest(geometry),
                 "camera_sha256": digest(cameras),
                 "calibration_sha256": digest(calibration),
-                "backend": "Eight disjoint point-chunk CPU color workers; serial global depth pass; full-image global occlusion buffer; exact int64 neighborhood minimum; file-backed candidates",
+                "backend": "Conservative 2 m fisheye voxel culling; disjoint point-chunk CPU color workers; serial global depth pass; full-image global occlusion buffer; exact int64 neighborhood minimum; file-backed candidates",
             },
             indent=2,
         )
