@@ -274,3 +274,38 @@ def test_scheduler_runs_color_prep_beside_geometry():
     assert list(blocked(names, done | {"cameras"}, {"geometry"})) == [("candidates", ["geometry"])]
     # colorize mode has no photo stage, so masks depend on nothing
     assert ready(["masks", "candidates", "blend", "export"], set(), set()) == ["masks"]
+
+
+def test_resume_identity_ignores_code_and_resource_changes():
+    from s20_pipeline.runner import code_changes, resume_identity
+
+    before = {
+        "output": "/o",
+        "options": {"color": True, "memory_gb": 16},
+        "python_code": {"a.py": "1"},
+        "native_code": {"m.cpp": "1"},
+        "source_identities": {
+            "/x/all.bag": {"bytes": 1, "mtime_ns": 2},
+            "/b/s20_reconstruct": "h1",
+        },
+    }
+    after = {
+        "output": "/o",
+        "options": {"color": True, "memory_gb": 64},
+        "python_code": {"a.py": "2"},
+        "native_code": {"m.cpp": "1"},
+        "source_identities": {
+            "/x/all.bag": {"bytes": 1, "mtime_ns": 2},
+            "/b/s20_reconstruct": "h2",
+        },
+    }
+    assert resume_identity(before) == resume_identity(after)
+    assert code_changes(before, after) == ["a.py", "s20_reconstruct"]
+    changed_input = {
+        **after,
+        "source_identities": {
+            **after["source_identities"],
+            "/x/all.bag": {"bytes": 9, "mtime_ns": 2},
+        },
+    }
+    assert resume_identity(before) != resume_identity(changed_input)

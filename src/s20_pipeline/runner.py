@@ -52,12 +52,38 @@ def stop(child):
 
 
 RESOURCE_OPTIONS = ("memory_gb", "cpu_threads", "color_workers", "resources", "chunk_points")
+CODE_KEYS = ("python_code", "native_code", "source_identities")
 
 
 def resume_identity(job):
-    """Everything that determines outputs. Resource limits only change speed and may differ on resume."""
+    """Inputs and options that determine outputs. Resource limits only change speed and may differ on resume."""
     options = {k: v for k, v in job["options"].items() if k not in RESOURCE_OPTIONS}
-    return {**job, "options": options}
+    inputs = {
+        k: v
+        for k, v in job.get("source_identities", {}).items()
+        if not k.endswith(("s20_reconstruct", "s20_refine_poses", "s20_geometry", "s20_blend"))
+    }
+    return {
+        **{k: v for k, v in job.items() if k not in CODE_KEYS},
+        "options": options,
+        "inputs": inputs,
+    }
+
+
+def code_changes(previous, job):
+    """Code or binaries that differ from the run's first attempt. Completed stage outputs are still verified by hash."""
+    changed = []
+    for key in ("python_code", "native_code"):
+        before, after = previous.get(key, {}), job.get(key, {})
+        changed += sorted(f for f in set(before) | set(after) if before.get(f) != after.get(f))
+    before, after = previous.get("source_identities", {}), job.get("source_identities", {})
+    changed += sorted(
+        Path(f).name
+        for f in set(before) | set(after)
+        if f.endswith(("s20_reconstruct", "s20_refine_poses", "s20_geometry", "s20_blend"))
+        and before.get(f) != after.get(f)
+    )
+    return changed
 
 
 DEPENDENCIES = {
@@ -116,10 +142,12 @@ def blocked(names, done, running):
 def _run(job, resume=False):
     out = Path(job["output"])
     receipt = out / "job.json"
+    changed_code = []
     if resume:
         previous = json.loads(receipt.read_text()) if receipt.is_file() else None
         if previous is None or resume_identity(previous) != resume_identity(job):
-            raise ValueError("Resume requires identical inputs, options, code and binaries")
+            raise ValueError("Resume requires identical inputs and options")
+        changed_code = code_changes(previous, job)
         atomic_json(receipt, job)
     else:
         atomic_json(receipt, job)
@@ -140,6 +168,9 @@ def _run(job, resume=False):
         atomic_json(out / "state.json", state)
 
     save()
+    if changed_code:
+        # Finished stages keep their verified outputs; remaining stages run with the new code.
+        emit("resume_notice", changed=changed_code)
     env = os.environ.copy()
     env.update(
         {
