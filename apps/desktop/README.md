@@ -36,9 +36,11 @@ the app reconstructs run history from the pipeline's own `job.json`,
 once when added and only ever read. If the drive is unmounted the scan shows a
 warning and cannot be processed until it is back. A scan added from an
 external drive (`/Volumes`) offers "Copy before processing": each run then
-starts with a visible copy step into `~/Downloads/S20 temp/<run>/`, processes
-from the copy, and deletes it when the run succeeds. Cancelled or failed runs
-keep the copy so Resume is fast; deleting the run removes it. The setting can
+starts with a visible copy step into `~/Downloads/S20 temp/<scan>-<id>/`,
+where the id hashes the scan's file names, sizes and modification times, so
+any run of the same scan reuses an existing copy instantly. The copy is
+deleted when a run succeeds; cancelled or failed runs keep it so Resume is
+fast, and deleting a run removes a copy no other run uses. The setting can
 be changed later from the scan's right-click menu.
 
 **Runs.** New run shows four choices (result type, remove people, exposure,

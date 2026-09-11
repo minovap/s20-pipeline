@@ -468,7 +468,7 @@ fn read_stage_log(run: String, stage: String, state: State<Engine>) -> Result<St
     Ok(String::from_utf8_lossy(tail).into_owned())
 }
 #[tauri::command]
-fn delete_run(run: String, app: tauri::AppHandle, state: State<Engine>) -> Result<(), String> {
+fn delete_run(run: String, state: State<Engine>) -> Result<(), String> {
     if state.running.load(Ordering::SeqCst) {
         return Err("Wait for the active job to finish first".into());
     }
@@ -480,8 +480,13 @@ fn delete_run(run: String, app: tauri::AppHandle, state: State<Engine>) -> Resul
     if !is_run {
         return Err("Not a run folder".into());
     }
-    if let Some(copy) = read_json(&folder.join("copy.json")) {
-        if let Some(source) = copy["source"].as_str() { remove_temp_copy(&app, &run, source); }
+    if let Some(temp) = read_json(&folder.join("copy.json")).and_then(|c| c["temp"].as_str().map(|t| t.to_string())) {
+        let shared = folder.parent().and_then(|runs| fs::read_dir(runs).ok()).map(|entries| {
+            entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p != &folder)
+                .filter_map(|p| read_json(&p.join("copy.json")))
+                .any(|c| c["temp"].as_str() == Some(temp.as_str()))
+        }).unwrap_or(false);
+        if !shared { remove_temp_copy(Path::new(&temp)); }
     }
     fs::remove_dir_all(folder).map_err(|e| e.to_string())
 }
@@ -558,17 +563,43 @@ fn job_args(o: &JobOptions) -> Result<Vec<String>, String> {
     }
     Ok(a)
 }
-/// Where a run's temporary scan copy lives: ~/Downloads/S20 temp/<run>/<scan>.
-fn temp_copy_dir(app: &tauri::AppHandle, output: &str, capture: &str) -> Result<PathBuf, String> {
-    let run = Path::new(output).file_name().and_then(|n| n.to_str()).ok_or("Invalid run folder")?;
-    let scan = Path::new(capture).file_name().and_then(|n| n.to_str()).ok_or("Invalid scan folder")?;
-    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-    Ok(downloads.join("S20 temp").join(run).join(scan))
+/// Identity of a scan folder from its file names, sizes and modification
+/// times (FNV-1a, 12 hex characters). The same scan always maps to the same
+/// temporary copy, so later runs and resumes find it without copying again.
+fn scan_identity(source: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    walk(source, &mut files)?;
+    let mut rows: Vec<(String, u64, u128)> = files
+        .iter()
+        .map(|(path, size)| {
+            let relative = path.strip_prefix(source).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            let mtime = fs::metadata(path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or(0);
+            (relative, *size, mtime)
+        })
+        .collect();
+    rows.sort();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for (name, size, mtime) in rows {
+        for byte in format!("{name}\0{size}\0{mtime}\n").bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    Ok(format!("{hash:016x}")[..12].to_string())
 }
+/// Where a scan's temporary copy lives: ~/Downloads/S20 temp/<scan>-<identity>.
+fn temp_copy_dir(app: &tauri::AppHandle, capture: &str) -> Result<PathBuf, String> {
+    let source = Path::new(capture);
+    let scan = source.file_name().and_then(|n| n.to_str()).ok_or("Invalid scan folder")?;
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    Ok(downloads.join("S20 temp").join(format!("{scan}-{}", scan_identity(source)?)))
+}
+/// Files of a scan folder, skipping hidden entries such as Finder's .DS_Store.
 fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with('.') { continue; }
         let meta = entry.metadata().map_err(|e| e.to_string())?;
         if meta.is_dir() { walk(&path, out)?; } else if meta.is_file() { out.push((path, meta.len())); }
     }
@@ -636,11 +667,8 @@ fn copy_scan(app: &tauri::AppHandle, state: &Engine, source: &Path, dest: &Path,
     emit("stage_completed", json!({"wall_s": started.elapsed().as_secs_f64()}));
     Ok(())
 }
-fn remove_temp_copy(app: &tauri::AppHandle, output: &str, capture: &str) {
-    if let Ok(dir) = temp_copy_dir(app, output, capture) {
-        let _ = fs::remove_dir_all(&dir);
-        if let Some(run_dir) = dir.parent() { let _ = fs::remove_dir(run_dir); }
-    }
+fn remove_temp_copy(temp: &Path) {
+    let _ = fs::remove_dir_all(temp);
 }
 
 #[tauri::command]
@@ -651,7 +679,7 @@ fn start_job(
 ) -> Result<(), String> {
     let mut effective = options.clone();
     let temp = if options.copy {
-        let dir = temp_copy_dir(&app, &options.output, &options.capture)?;
+        let dir = temp_copy_dir(&app, &options.capture)?;
         effective.capture = dir.to_string_lossy().into_owned();
         Some(dir)
     } else { None };
@@ -728,7 +756,7 @@ fn start_job(
             let sidecar = Path::new(&output).with_extension("copy.json");
             let _ = write_json(&Path::new(&output).join("copy.json"), &json!({"source": source, "temp": effective.capture}));
             let _ = fs::remove_file(sidecar);
-            if code == 0 { remove_temp_copy(&app, &output, &source.to_string_lossy()); }
+            if code == 0 { remove_temp_copy(Path::new(&effective.capture)); }
         }
         let _ = app.emit("job-exit", json!({"run_id":run_id,"code":code}));
     });
@@ -1059,6 +1087,22 @@ mod tests {
     fn slugs_keep_names_readable() {
         assert_eq!(slug("  Garden / north  "), "Garden - north");
         assert_eq!(slug(""), "Project");
+    }
+    #[test]
+    fn scan_identity_depends_on_names_sizes_and_times() {
+        let dir = std::env::temp_dir().join(format!("s20-scan-{}", now()));
+        fs::create_dir_all(dir.join("info")).unwrap();
+        fs::write(dir.join("all.bag"), b"abc").unwrap();
+        fs::write(dir.join("info/calibration.yaml"), b"x").unwrap();
+        let stamp = UNIX_EPOCH + std::time::Duration::from_nanos(1_700_000_000_000_000_000);
+        for f in ["all.bag", "info/calibration.yaml"] { fs::File::options().write(true).open(dir.join(f)).unwrap().set_modified(stamp).unwrap(); }
+        fs::write(dir.join(".DS_Store"), b"ignored").unwrap();
+        let a = scan_identity(&dir).unwrap();
+        assert_eq!(a, "73b9e7488f43");
+        assert_eq!(a, scan_identity(&dir).unwrap());
+        fs::write(dir.join("all.bag"), b"abcd").unwrap();
+        assert_ne!(a, scan_identity(&dir).unwrap());
+        let _ = fs::remove_dir_all(dir);
     }
     #[test]
     fn runs_are_reconstructed_from_disk() {
