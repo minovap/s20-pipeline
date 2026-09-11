@@ -9,6 +9,7 @@ from PIL import Image
 
 import s20_pipeline.collect as module
 from s20_pipeline.camera import CameraFrame, FisheyeCalibration
+from s20_pipeline.cpu_visibility import CpuVisibility
 
 NATIVE_VISIBILITY = Path(__file__).parents[1] / "build/libs20_visibility.dylib"
 
@@ -91,7 +92,10 @@ def test_pread_exact_retries_short_reads_and_rejects_truncation(monkeypatch):
 
 
 @pytest.mark.parametrize("workers", [1, 3])
-def test_deferred_finalizer_matches_legacy_packing_and_stable_sort(tmp_path, workers):
+@pytest.mark.parametrize("native", [False, True])
+def test_deferred_finalizer_matches_legacy_packing_and_stable_sort(tmp_path, workers, native):
+    if native and not NATIVE_VISIBILITY.is_file():
+        pytest.skip("CPU visibility is not built")
     calibration = replace(camera().calibration, width=4, height=4)
     frames = []
     images = []
@@ -139,8 +143,13 @@ def test_deferred_finalizer_matches_legacy_packing_and_stable_sort(tmp_path, wor
     order = np.argsort(-expected[:, :, 7], axis=1, kind="stable")
     expected = np.take_along_axis(expected, order[:, :, None], axis=1)
 
+    native_backend = None
+    if native:
+        xyz = np.zeros((3, 3), dtype="float32")
+        native_backend = CpuVisibility(xyz, xyz, NATIVE_VISIBILITY)
+        native_backend.release_geometry()
     actual, stats = module._finalize_observations(
-        tmp_path, records, frames, chunk=1, grid=(8, 6), workers=workers
+        tmp_path, records, frames, chunk=1, grid=(8, 6), workers=workers, native=native_backend
     )
     np.testing.assert_array_equal(actual, expected)
     assert stats["final_occupied"] == 7

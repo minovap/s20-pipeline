@@ -38,7 +38,7 @@ class CpuVisibility:
         self.library = ctypes.CDLL(str(library))
         self.library.s20_visibility_abi_version.argtypes = []
         self.library.s20_visibility_abi_version.restype = ctypes.c_uint32
-        if self.library.s20_visibility_abi_version() != 2:
+        if self.library.s20_visibility_abi_version() != 3:
             raise RuntimeError("Unsupported native visibility ABI")
         self._configure()
     def _configure(self):
@@ -83,6 +83,16 @@ class CpuVisibility:
             ulong_pointer,
         ]
         self.library.s20_rank_insert.restype = ctypes.c_int
+        self.library.s20_bucket_slots.argtypes = [
+            float_pointer,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ulong_pointer,
+            ulong_pointer,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        self.library.s20_bucket_slots.restype = ctypes.c_int
 
     def decide(self, ids, u, v, distance, blocker_keys, exact_keys, frame, mask):
         ids = np.asarray(ids)
@@ -194,6 +204,48 @@ class CpuVisibility:
         if result:
             raise RuntimeError(f"Native ranking failed with error {result}")
         return inserted.value
+
+    def bucket_slots(self, observations, offsets, slot_ids):
+        observations = np.asarray(observations)
+        offsets = np.ascontiguousarray(offsets, dtype=np.uint64)
+        slot_ids = np.asarray(slot_ids)
+        if (
+            observations.dtype != np.float32
+            or observations.ndim != 3
+            or observations.shape[1:] != (4, 8)
+            or not observations.flags.c_contiguous
+        ):
+            raise ValueError("Native buckets expect contiguous n x 4 x 8 float32 records")
+        if offsets.ndim != 1 or len(offsets) < 2:
+            raise ValueError("Native bucket offsets must contain every photo boundary")
+        if (
+            offsets[0] != 0
+            or np.any(offsets[1:] < offsets[:-1])
+            or int(offsets[-1]) != slot_ids.size
+        ):
+            raise ValueError("Native bucket offsets must exactly bound the slot index")
+        if slot_ids.dtype not in (np.dtype(np.uint32), np.dtype(np.uint64)):
+            raise ValueError("Native bucket slot IDs must be uint32 or uint64")
+        if slot_ids.ndim != 1 or not slot_ids.flags.c_contiguous or not slot_ids.flags.writeable:
+            raise ValueError("Native bucket slot IDs must be writable and contiguous")
+        cursors = offsets[:-1].copy()
+        result = self.library.s20_bucket_slots(
+            observations.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(observations),
+            len(offsets) - 1,
+            offsets.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64)),
+            cursors.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64)),
+            ctypes.c_void_p(slot_ids.ctypes.data),
+            slot_ids.dtype.itemsize * 8,
+        )
+        if result:
+            raise RuntimeError(f"Native bucket scatter failed with error {result}")
+        if not np.array_equal(cursors, offsets[1:]):
+            raise RuntimeError("Native candidate photo buckets are incomplete")
+
+    def release_geometry(self):
+        self.xyz = None
+        self.normals = None
 
     def stats(self):
         return {

@@ -180,3 +180,15 @@ After NumPy computes the unchanged float32 score, the native CPU library now sca
 | Native rank insertion | 11.918 s, 12.096 s, 11.996 s | 11.996 s |
 
 This is a further **7.59% wall-time reduction** (`1.082×`). Profiled color wall time fell from 2.170 s to 1.521 s; summed rank worker time fell from 4.832 s to 1.736 s and the separate scatter timer fell from 1.652 s to zero. All three observation files match the frozen golden file byte for byte. Tests cover first-minimum ties, overwrite history, infinity and NaN inputs, exact insertion counts and untouched fields. The combined median improvement from the original 24.390-second CPU baseline is **50.8%** (`2.033×`).
+
+
+## Native final photo buckets, 12 September 2026
+
+Final occupied candidate slots are now grouped by photo with one ascending native scan of points and their four slots. Each occupied flat slot ID is appended at its photo's prefix cursor. This preserves the previous stable ascending slot order within every photo while removing per-chunk occupied arrays, stable photo sorts, boundary searches and Python scatter loops. Cursor bounds and final counts are checked, and both uint32 and uint64 slot-index mappings remain supported. The NumPy implementation remains the no-library fallback.
+
+| Collector | Candidate-stage wall samples | Median wall | Median sampled RSS |
+|---|---|---:|---:|
+| Native rank insertion | 11.918 s, 12.096 s, 11.996 s | 11.996 s | 2.720 GB |
+| Native photo buckets | 11.215 s, 11.206 s, 11.367 s | 11.215 s | 2.490 GB |
+
+This is another **6.51% wall-time reduction** (`1.070×`). The profiled bucket phase fell from 0.750 s to 0.045 s. All three full observation files matched the frozen golden file byte for byte, and bounded-finalizer tests exercise both native and fallback grouping. The combined median improvement from the original 24.390-second CPU baseline is **54.0%** (`2.175×`).

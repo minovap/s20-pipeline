@@ -19,7 +19,47 @@ inline float dot3(const float *a, float x, float y, float z) {
 
 }  // namespace
 
-extern "C" uint32_t s20_visibility_abi_version() { return 2u; }
+extern "C" uint32_t s20_visibility_abi_version() { return 3u; }
+
+extern "C" int s20_bucket_slots(
+    const float *observations,
+    uint64_t point_count,
+    uint32_t photo_count,
+    const uint64_t *offsets,
+    uint64_t *cursors,
+    void *slot_ids,
+    uint32_t slot_bits
+) {
+    if (!observations || !offsets || !cursors || !slot_ids || photo_count == 0 ||
+        (slot_bits != 32u && slot_bits != 64u)) {
+        return 1;
+    }
+    auto *slots32 = static_cast<uint32_t *>(slot_ids);
+    auto *slots64 = static_cast<uint64_t *>(slot_ids);
+    for (uint64_t point = 0; point < point_count; ++point) {
+        const float *records = observations + size_t(point) * 4u * 8u;
+        for (uint32_t candidate = 0; candidate < 4; ++candidate) {
+            const float *record = records + size_t(candidate) * 8u;
+            if (!(record[7] > 0.0f)) continue;
+            const float photo_value = record[6];
+            if (!std::isfinite(photo_value) || photo_value < 0.0f ||
+                double(photo_value) >= double(photo_count)) {
+                return 2;
+            }
+            const uint32_t photo = static_cast<uint32_t>(photo_value);
+            uint64_t destination = cursors[photo]++;
+            if (destination >= offsets[photo + 1u]) return 3;
+            const uint64_t flat_slot = point * 4u + candidate;
+            if (slot_bits == 32u) {
+                if (flat_slot > UINT32_MAX) return 4;
+                slots32[destination] = static_cast<uint32_t>(flat_slot);
+            } else {
+                slots64[destination] = flat_slot;
+            }
+        }
+    }
+    return 0;
+}
 
 extern "C" int s20_rank_insert(
     float *observations,

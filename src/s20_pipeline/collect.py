@@ -85,7 +85,7 @@ def _load_image(frame):
     return image, perf_counter() - started
 
 
-def _finalize_observations(dest, observations, frames, chunk, grid, workers):
+def _finalize_observations(dest, observations, frames, chunk, grid, workers, native=None):
     """Sort deferred ranks, group slots by photo, and sample final winners once."""
     n, candidates = observations.shape[:2]
     scores = observations[:, :, 7]
@@ -125,24 +125,30 @@ def _finalize_observations(dest, observations, frames, chunk, grid, workers):
     slot_ids = _empty_array(slot_path, slot_dtype, (final_occupied,))
     cursors = offsets[:-1].copy()
     bucket_started = perf_counter()
-    for start in range(0, n, chunk):
-        end = min(n, start + chunk)
-        occupied = scores[start:end].ravel() > 0
-        if not occupied.any():
-            continue
-        local_slots = np.flatnonzero(occupied).astype(slot_dtype)
-        local_slots += np.asarray(start * candidates, dtype=slot_dtype)
-        local_photos = photo_ids[start:end].ravel()[occupied]
-        order = np.argsort(local_photos, kind="stable")
-        local_slots = local_slots[order]
-        local_photos = local_photos[order]
-        boundaries = np.r_[0, np.flatnonzero(local_photos[1:] != local_photos[:-1]) + 1]
-        for begin, finish in zip(boundaries, np.r_[boundaries[1:], len(local_photos)], strict=True):
-            photo = int(local_photos[begin])
-            destination = int(cursors[photo])
-            count = int(finish - begin)
-            slot_ids[destination : destination + count] = local_slots[begin:finish]
-            cursors[photo] += count
+    if native is not None:
+        native.bucket_slots(observations, offsets, slot_ids)
+        cursors = offsets[1:].copy()
+    else:
+        for start in range(0, n, chunk):
+            end = min(n, start + chunk)
+            occupied = scores[start:end].ravel() > 0
+            if not occupied.any():
+                continue
+            local_slots = np.flatnonzero(occupied).astype(slot_dtype)
+            local_slots += np.asarray(start * candidates, dtype=slot_dtype)
+            local_photos = photo_ids[start:end].ravel()[occupied]
+            order = np.argsort(local_photos, kind="stable")
+            local_slots = local_slots[order]
+            local_photos = local_photos[order]
+            boundaries = np.r_[0, np.flatnonzero(local_photos[1:] != local_photos[:-1]) + 1]
+            for begin, finish in zip(
+                boundaries, np.r_[boundaries[1:], len(local_photos)], strict=True
+            ):
+                photo = int(local_photos[begin])
+                destination = int(cursors[photo])
+                count = int(finish - begin)
+                slot_ids[destination : destination + count] = local_slots[begin:finish]
+                cursors[photo] += count
     bucket_s = perf_counter() - bucket_started
     if not np.array_equal(cursors, offsets[1:]):
         raise RuntimeError("Final candidate photo buckets are incomplete")
@@ -858,11 +864,16 @@ def collect(
     voxel_order = None
     color_chunk = None
     projection = projected_chunks = selected = selected_ids = depth_id = filled = None
-    mask = metal_result = native_visibility = None
+    mask = metal_result = None
     totals = image_future = None
     xyz = normals = all_point_ids = None
+    if native_visibility is not None:
+        native_visibility.release_geometry()
     del point_index, metal
-    c, finalize = _finalize_observations(dest, c, fs, CHUNK, (GW, GH), workers)
+    c, finalize = _finalize_observations(
+        dest, c, fs, CHUNK, (GW, GH), workers, native_visibility
+    )
+    native_visibility = None
     if diagnostics:
         (dest / "collector-diagnostics.json").write_text(
             json.dumps({"backend": backend, "images": diagnostic_rows}, indent=2)

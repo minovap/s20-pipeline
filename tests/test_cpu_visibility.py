@@ -204,3 +204,5 @@ def test_native_ranking_matches_chronological_strict_numpy_updates():
     np.testing.assert_array_equal(actual.view("uint32"), expected.view("uint32"))
     with pytest.raises(ValueError, match="photo ID"):
         native.insert(actual, ids[:1], u[:1], v[:1], np.array([2], dtype="float32"), -1)
+    with pytest.raises(ValueError, match="exactly bound"):
+        native.bucket_slots(actual, np.array([1, 1], dtype="uint64"), np.empty(0, "uint32"))
