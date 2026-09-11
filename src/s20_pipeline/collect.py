@@ -171,29 +171,38 @@ def _finalize_observations(dest, observations, frames, chunk, grid, workers, nat
             finish = min(int(offsets[photo + 1]), begin + pack_chunk)
             itemsize = np.dtype(slot_dtype).itemsize
             raw_slots = _pread_exact(slot_file, (finish - begin) * itemsize, begin * itemsize)
-            flat_slots = np.frombuffer(raw_slots, dtype=slot_dtype).astype(np.intp)
-            ids = flat_slots // candidates
-            slots = flat_slots % candidates
-            u = uv[ids, slots, 0]
-            v = uv[ids, slots, 1]
-            x = u.astype("int32")
-            y = v.astype("int32")
-            p00 = image[y, x].astype("float32")
-            p10 = image[y, x + 1].astype("float32")
-            p01 = image[y + 1, x].astype("float32")
-            p11 = image[y + 1, x + 1].astype("float32")
-            a = (u - x)[:, None]
-            b = (v - y)[:, None]
-            color = (1 - a) * (1 - b) * p00 + a * (1 - b) * p10 + (1 - a) * b * p01 + a * b * p11
-            gradient = np.maximum(abs(p10 - p00).max(1), abs(p01 - p00).max(1))
-            observations[ids, slots, :3] = color
-            observations[ids, slots, 3] = gradient
-            observations[ids, slots, 4] = np.clip(
-                u / calibration.width * grid_width - 0.5, 0, grid_width - 1
-            )
-            observations[ids, slots, 5] = np.clip(
-                v / calibration.height * grid_height - 0.5, 0, grid_height - 1
-            )
+            flat_slots = np.frombuffer(raw_slots, dtype=slot_dtype)
+            if native is not None:
+                native.pack_slots(observations, flat_slots, image, grid)
+            else:
+                flat_slots = flat_slots.astype(np.intp)
+                ids = flat_slots // candidates
+                slots = flat_slots % candidates
+                u = uv[ids, slots, 0]
+                v = uv[ids, slots, 1]
+                x = u.astype("int32")
+                y = v.astype("int32")
+                p00 = image[y, x].astype("float32")
+                p10 = image[y, x + 1].astype("float32")
+                p01 = image[y + 1, x].astype("float32")
+                p11 = image[y + 1, x + 1].astype("float32")
+                a = (u - x)[:, None]
+                b = (v - y)[:, None]
+                color = (
+                    (1 - a) * (1 - b) * p00
+                    + a * (1 - b) * p10
+                    + (1 - a) * b * p01
+                    + a * b * p11
+                )
+                gradient = np.maximum(abs(p10 - p00).max(1), abs(p01 - p00).max(1))
+                observations[ids, slots, :3] = color
+                observations[ids, slots, 3] = gradient
+                observations[ids, slots, 4] = np.clip(
+                    u / calibration.width * grid_width - 0.5, 0, grid_width - 1
+                )
+                observations[ids, slots, 5] = np.clip(
+                    v / calibration.height * grid_height - 0.5, 0, grid_height - 1
+                )
         return decode_s
 
     with slot_path.open("rb", buffering=0) as slot_stream:

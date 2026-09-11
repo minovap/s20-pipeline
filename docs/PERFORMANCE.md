@@ -192,3 +192,15 @@ Final occupied candidate slots are now grouped by photo with one ascending nativ
 | Native photo buckets | 11.215 s, 11.206 s, 11.367 s | 11.215 s | 2.490 GB |
 
 This is another **6.51% wall-time reduction** (`1.070×`). The profiled bucket phase fell from 0.750 s to 0.045 s. All three full observation files matched the frozen golden file byte for byte, and bounded-finalizer tests exercise both native and fallback grouping. The combined median improvement from the original 24.390-second CPU baseline is **54.0%** (`2.175×`).
+
+
+## Native bounded final materialization, 12 September 2026
+
+The existing three-photo workers and 32,768-slot read bound remain, but each native call now materializes one slot batch directly from the decoded RGB image into observation fields 0–5. It loads scratch `u/v` before overwriting, retains float64 bilinear weights and left-associated color arithmetic, uses separate float32 division/multiplication/subtraction steps for grid coordinates, and disables floating-point contraction. Photo IDs and scores are not rewritten. Both uint32 and uint64 flat-slot indexes are supported; slot and image bounds are checked. NumPy remains the no-library fallback.
+
+| Collector | Candidate-stage wall samples | Median wall |
+|---|---|---:|
+| Native photo buckets | 11.215 s, 11.206 s, 11.367 s | 11.215 s |
+| Native final materialization | 9.847 s, 10.062 s, 10.036 s | 10.036 s |
+
+This is another **10.51% wall-time reduction** (`1.117×`). The profiled final-pack phase, including concurrent image decoding, fell from 3.157 s to 1.939 s. All three full observation files matched the frozen golden file byte for byte. The combined median improvement from the original 24.390-second CPU baseline is **58.9%** (`2.430×`).

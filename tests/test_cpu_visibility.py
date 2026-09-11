@@ -206,3 +206,57 @@ def test_native_ranking_matches_chronological_strict_numpy_updates():
         native.insert(actual, ids[:1], u[:1], v[:1], np.array([2], dtype="float32"), -1)
     with pytest.raises(ValueError, match="exactly bound"):
         native.bucket_slots(actual, np.array([1, 1], dtype="uint64"), np.empty(0, "uint32"))
+
+
+@pytest.mark.parametrize("slot_dtype", ["uint32", "uint64"])
+@native_required
+def test_native_pack_matches_numpy_at_pixel_edges(slot_dtype):
+    image = np.array(
+        [
+            [[0, 255, 3], [255, 0, 127], [4, 200, 1]],
+            [[250, 10, 255], [9, 240, 0], [255, 1, 128]],
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        ],
+        dtype="uint8",
+    )
+    records = np.zeros((2, 4, 8), dtype="float32")
+    flat_slots = np.array([0, 3, 4, 7], dtype=slot_dtype)
+    coordinates = (
+        (0.0, 0.0),
+        (np.nextafter(np.float32(2), np.float32(0)), np.float32(0.5)),
+        (np.float32(0.5), np.nextafter(np.float32(2), np.float32(0))),
+        (np.float32(1.25), np.float32(1.75)),
+    )
+    for flat_slot, coordinate in zip(flat_slots, coordinates, strict=True):
+        records.reshape(-1, 8)[int(flat_slot), :2] = coordinate
+        records.reshape(-1, 8)[int(flat_slot), 6:] = (17, 0.75)
+    expected = records.copy()
+    slots = expected.reshape(-1, 8)[flat_slots.astype(np.intp)]
+    u = slots[:, 0].copy()
+    v = slots[:, 1].copy()
+    x = u.astype("int32")
+    y = v.astype("int32")
+    p00 = image[y, x].astype("float32")
+    p10 = image[y, x + 1].astype("float32")
+    p01 = image[y + 1, x].astype("float32")
+    p11 = image[y + 1, x + 1].astype("float32")
+    a = (u - x)[:, None]
+    b = (v - y)[:, None]
+    slots[:, :3] = (
+        (1 - a) * (1 - b) * p00
+        + a * (1 - b) * p10
+        + (1 - a) * b * p01
+        + a * b * p11
+    )
+    slots[:, 3] = np.maximum(abs(p10 - p00).max(1), abs(p01 - p00).max(1))
+    slots[:, 4] = np.clip(u / image.shape[1] * 8 - 0.5, 0, 7)
+    slots[:, 5] = np.clip(v / image.shape[0] * 6 - 0.5, 0, 5)
+    expected.reshape(-1, 8)[flat_slots.astype(np.intp)] = slots
+
+    xyz = np.zeros((2, 3), dtype="float32")
+    native = CpuVisibility(xyz, xyz, LIBRARY)
+    native.release_geometry()
+    native.pack_slots(records, flat_slots, image, (8, 6))
+    np.testing.assert_array_equal(records.view("uint32"), expected.view("uint32"))
+    with pytest.raises(ValueError, match="grid dimensions"):
+        native.pack_slots(records, flat_slots, image, (-1, 6))

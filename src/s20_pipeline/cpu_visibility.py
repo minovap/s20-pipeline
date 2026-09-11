@@ -38,7 +38,7 @@ class CpuVisibility:
         self.library = ctypes.CDLL(str(library))
         self.library.s20_visibility_abi_version.argtypes = []
         self.library.s20_visibility_abi_version.restype = ctypes.c_uint32
-        if self.library.s20_visibility_abi_version() != 3:
+        if self.library.s20_visibility_abi_version() != 4:
             raise RuntimeError("Unsupported native visibility ABI")
         self._configure()
     def _configure(self):
@@ -93,6 +93,19 @@ class CpuVisibility:
             ctypes.c_uint32,
         ]
         self.library.s20_bucket_slots.restype = ctypes.c_int
+        self.library.s20_pack_slots.argtypes = [
+            float_pointer,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            byte_pointer,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        self.library.s20_pack_slots.restype = ctypes.c_int
 
     def decide(self, ids, u, v, distance, blocker_keys, exact_keys, frame, mask):
         ids = np.asarray(ids)
@@ -246,6 +259,50 @@ class CpuVisibility:
     def release_geometry(self):
         self.xyz = None
         self.normals = None
+
+    def pack_slots(self, observations, slot_ids, image, grid):
+        """Materialize unique slots; concurrent calls must own disjoint slot IDs."""
+        observations = np.asarray(observations)
+        slot_ids = np.asarray(slot_ids)
+        image = np.asarray(image)
+        if (
+            observations.dtype != np.float32
+            or observations.ndim != 3
+            or observations.shape[1:] != (4, 8)
+            or not observations.flags.c_contiguous
+            or not observations.flags.writeable
+        ):
+            raise ValueError("Native packing expects writable contiguous n x 4 x 8 records")
+        if (
+            slot_ids.ndim != 1
+            or slot_ids.dtype not in (np.dtype(np.uint32), np.dtype(np.uint64))
+            or not slot_ids.flags.c_contiguous
+        ):
+            raise ValueError("Native packing slot IDs must be a contiguous uint32 or uint64 vector")
+        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError("Native packing expects an h x w x 3 uint8 image")
+        image = np.ascontiguousarray(image)
+        grid_width, grid_height = grid
+        uint_max = np.iinfo(np.uint32).max
+        int_max = np.iinfo(np.int32).max
+        if not 0 < image.shape[1] <= int_max or not 0 < image.shape[0] <= int_max:
+            raise ValueError("Native packing image dimensions must fit int32")
+        if not 0 < grid_width <= uint_max or not 0 < grid_height <= uint_max:
+            raise ValueError("Native packing grid dimensions must fit uint32")
+        result = self.library.s20_pack_slots(
+            observations.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(observations),
+            ctypes.c_void_p(slot_ids.ctypes.data),
+            len(slot_ids),
+            slot_ids.dtype.itemsize * 8,
+            image.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            image.shape[1],
+            image.shape[0],
+            grid_width,
+            grid_height,
+        )
+        if result:
+            raise RuntimeError(f"Native final packing failed with error {result}")
 
     def stats(self):
         return {

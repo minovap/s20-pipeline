@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +20,74 @@ inline float dot3(const float *a, float x, float y, float z) {
 
 }  // namespace
 
-extern "C" uint32_t s20_visibility_abi_version() { return 3u; }
+extern "C" uint32_t s20_visibility_abi_version() { return 4u; }
+
+extern "C" int s20_pack_slots(
+    float *observations,
+    uint64_t point_count,
+    const void *slot_ids,
+    uint64_t slot_count,
+    uint32_t slot_bits,
+    const uint8_t *image,
+    uint32_t image_width,
+    uint32_t image_height,
+    uint32_t grid_width,
+    uint32_t grid_height
+) {
+    if (!observations || !image || image_width < 2u || image_height < 2u || grid_width == 0u ||
+        grid_height == 0u || (slot_bits != 32u && slot_bits != 64u) ||
+        (slot_count > 0 && !slot_ids)) {
+        return 1;
+    }
+    const auto *slots32 = static_cast<const uint32_t *>(slot_ids);
+    const auto *slots64 = static_cast<const uint64_t *>(slot_ids);
+    const uint64_t total_slots = point_count * 4u;
+    for (uint64_t index = 0; index < slot_count; ++index) {
+        const uint64_t flat_slot = slot_bits == 32u ? uint64_t(slots32[index]) : slots64[index];
+        if (flat_slot >= total_slots) return 2;
+        float *record = observations + size_t(flat_slot) * 8u;
+        const float u = record[0];
+        const float v = record[1];
+        if (!std::isfinite(u) || !std::isfinite(v) || u < 0.0f || v < 0.0f ||
+            u >= float(image_width - 1u) || v >= float(image_height - 1u)) {
+            return 3;
+        }
+        const int32_t x = static_cast<int32_t>(u);
+        const int32_t y = static_cast<int32_t>(v);
+        const size_t pixel = (size_t(y) * image_width + uint32_t(x)) * 3u;
+        const uint8_t *p00 = image + pixel;
+        const uint8_t *p10 = p00 + 3u;
+        const uint8_t *p01 = p00 + size_t(image_width) * 3u;
+        const uint8_t *p11 = p01 + 3u;
+        const double a = double(u) - double(x);
+        const double b = double(v) - double(y);
+        const double one_minus_a = 1.0 - a;
+        const double one_minus_b = 1.0 - b;
+        for (uint32_t channel = 0; channel < 3u; ++channel) {
+            const double t00 = (one_minus_a * one_minus_b) * double(p00[channel]);
+            const double t10 = (a * one_minus_b) * double(p10[channel]);
+            const double t01 = (one_minus_a * b) * double(p01[channel]);
+            const double t11 = (a * b) * double(p11[channel]);
+            record[channel] = float(((t00 + t10) + t01) + t11);
+        }
+        int gradient = 0;
+        for (uint32_t channel = 0; channel < 3u; ++channel) {
+            const int horizontal = std::abs(int(p10[channel]) - int(p00[channel]));
+            const int vertical = std::abs(int(p01[channel]) - int(p00[channel]));
+            gradient = std::max(gradient, std::max(horizontal, vertical));
+        }
+        record[3] = float(gradient);
+        float grid_u = u / float(image_width);
+        grid_u = grid_u * float(grid_width);
+        grid_u = grid_u - 0.5f;
+        record[4] = std::clamp(grid_u, 0.0f, float(grid_width - 1u));
+        float grid_v = v / float(image_height);
+        grid_v = grid_v * float(grid_height);
+        grid_v = grid_v - 0.5f;
+        record[5] = std::clamp(grid_v, 0.0f, float(grid_height - 1u));
+    }
+    return 0;
+}
 
 extern "C" int s20_bucket_slots(
     const float *observations,
