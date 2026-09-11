@@ -41,3 +41,24 @@ test('union mask shows a point once even when boxes overlap', () => {
   const mask = unionMask(data, [100, 0, 0], [[[100, -1, -1], [107, 1, 1]], [[105, -1, -1], [110, 1, 1]]]);
   assert.deepEqual([...mask], [1, 1, 0]);
 });
+
+test('level ground finds a tilted plane and puts it at height 0', async () => {
+  const {levelGround, IDENTITY, rotationMatrix} = await import('../src/viewer/orient.ts');
+  const n = 4000, data = new Float32Array(n * 6);
+  // Plane tilted 5 degrees about x, offset 2 m up, plus some scattered noise points above it.
+  const tilt = 5 * Math.PI / 180;
+  for (let i = 0; i < n; i++) {
+    const x = (i % 63) - 31, y = Math.floor(i / 63) - 31;
+    const onPlane = i % 10 !== 0;
+    const z = onPlane ? 2 + Math.tan(tilt) * y : 2 + Math.tan(tilt) * y + 1 + (i % 7);
+    data.set([x, y, z, 0.5, 0.5, 0.5], i * 6);
+  }
+  const o = levelGround(data, IDENTITY);
+  assert(o, 'plane found');
+  assert(Math.abs(Math.abs(o.rotation[0]) - 5) < 0.3, `roll ${o.rotation[0]}`);
+  assert(Math.abs(o.rotation[1]) < 0.3, `pitch ${o.rotation[1]}`);
+  assert(Math.abs(o.translation[2] + 2) < 0.1, `height ${o.translation[2]}`);
+  const r = rotationMatrix({rotation: [0, 0, 90], translation: [0, 0, 0]});
+  // yaw 90: x axis maps to y
+  assert(Math.abs(r[3] - 1) < 1e-9 && Math.abs(r[1] + 1) < 1e-9);
+});

@@ -3,7 +3,8 @@
 // side-by-side compare pane. Draws on demand only.
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
-import type {Box, Cloud} from '../types';
+import type {Box, Cloud, Orientation} from '../types';
+import {IDENTITY, quaternion} from './orient';
 
 export type ViewMode = 'persp' | 'top' | 'front' | 'side';
 export const DEPTH_AXIS: Record<Exclude<ViewMode, 'persp'>, 0 | 1 | 2> = {top: 2, front: 1, side: 0};
@@ -20,7 +21,7 @@ const FRAG = `
 varying vec3 vColor;
 void main(){ vec2 d = gl_PointCoord - vec2(0.5); if (dot(d, d) > 0.25) discard; gl_FragColor = vec4(vColor, 1.0); }`;
 
-type Entry = {cloud: Cloud; points: THREE.Points; visible: THREE.BufferAttribute; material: THREE.ShaderMaterial; bounds: THREE.Box3; visibleBounds: THREE.Box3; shown: boolean};
+type Entry = {cloud: Cloud; points: THREE.Points; visible: THREE.BufferAttribute; material: THREE.ShaderMaterial; localBounds: THREE.Box3; bounds: THREE.Box3; visibleBounds: THREE.Box3; shown: boolean; mask: Float32Array | null};
 
 export class CloudRenderer {
   private renderer: THREE.WebGLRenderer;
@@ -30,6 +31,7 @@ export class CloudRenderer {
   private controls: OrbitControls;
   private entries = new Map<string, Entry>();
   private outline: THREE.LineSegments | null = null;
+  private grid: THREE.GridHelper | null = null;
   private observer: ResizeObserver;
   worldOrigin: THREE.Vector3 | null = null;
   mode: ViewMode = 'persp';
@@ -90,9 +92,11 @@ export class CloudRenderer {
       const points = new THREE.Points(geometry, material);
       points.frustumCulled = false;
       points.position.copy(new THREE.Vector3(...(cloud.info.origin as [number, number, number])).sub(this.worldOrigin));
-      const bounds = new THREE.Box3(new THREE.Vector3(...(cloud.info.bounds[0] as [number, number, number])), new THREE.Vector3(...(cloud.info.bounds[1] as [number, number, number]))).translate(points.position);
+      const localBounds = new THREE.Box3(new THREE.Vector3(...(cloud.info.bounds[0] as [number, number, number])), new THREE.Vector3(...(cloud.info.bounds[1] as [number, number, number])));
       this.scene.add(points);
-      this.entries.set(path, {cloud, points, visible, material, bounds, visibleBounds: bounds.clone(), shown: true});
+      const entry: Entry = {cloud, points, visible, material, localBounds, bounds: new THREE.Box3(), visibleBounds: new THREE.Box3(), shown: true, mask: null};
+      this.entries.set(path, entry);
+      this.setOrientation(path, IDENTITY);
     }
     if (changed) this.draw();
     return changed;
@@ -106,23 +110,49 @@ export class CloudRenderer {
     this.entries.delete(path);
   }
 
+  /** Rotate about the cloud's own origin and shift it; bounds follow. */
+  setOrientation(path: string, o: Orientation) {
+    const e = this.entries.get(path);
+    if (!e || !this.worldOrigin) return;
+    e.points.quaternion.copy(quaternion(o));
+    e.points.position.copy(new THREE.Vector3(...(e.cloud.info.origin as [number, number, number])).sub(this.worldOrigin).add(new THREE.Vector3(...o.translation)));
+    e.points.updateMatrixWorld(true);
+    e.bounds.copy(e.localBounds).applyMatrix4(e.points.matrixWorld);
+    this.updateVisibleBounds(e);
+    this.draw();
+  }
+
   /** null shows every point; an all-zero mask hides the cloud entirely. */
   setMask(path: string, mask: Float32Array | null) {
     const e = this.entries.get(path);
     if (!e) return;
-    if (!mask) { (e.visible.array as Float32Array).fill(1); e.shown = true; e.visibleBounds.copy(e.bounds); }
-    else {
-      (e.visible.array as Float32Array).set(mask);
-      const d = e.cloud.data, box = new THREE.Box3();
-      const v = new THREE.Vector3();
-      for (let i = 0; i < mask.length; i++) if (mask[i]) box.expandByPoint(v.set(d[i * 6], d[i * 6 + 1], d[i * 6 + 2]));
-      e.shown = !box.isEmpty();
-      e.visibleBounds.copy(box.isEmpty() ? e.bounds : box.translate(e.points.position));
-    }
+    e.mask = mask;
+    if (!mask) (e.visible.array as Float32Array).fill(1);
+    else (e.visible.array as Float32Array).set(mask);
+    this.updateVisibleBounds(e);
     e.points.visible = e.shown;
     e.visible.needsUpdate = true;
     this.draw();
   }
+  private updateVisibleBounds(e: Entry) {
+    if (!e.mask) { e.shown = true; e.visibleBounds.copy(e.bounds); return; }
+    const d = e.cloud.data, box = new THREE.Box3(), v = new THREE.Vector3(), m = e.points.matrixWorld;
+    for (let i = 0; i < e.mask.length; i++) if (e.mask[i]) box.expandByPoint(v.set(d[i * 6], d[i * 6 + 1], d[i * 6 + 2]).applyMatrix4(m));
+    e.shown = !box.isEmpty();
+    e.visibleBounds.copy(box.isEmpty() ? e.bounds : box);
+    e.points.visible = e.shown;
+  }
+
+  /** Bounds of one cloud after orientation, in world coordinates. */
+  worldBounds(path: string): Box | null {
+    const e = this.entries.get(path);
+    if (!e || !this.worldOrigin) return null;
+    const lo = e.bounds.min.clone().add(this.worldOrigin), hi = e.bounds.max.clone().add(this.worldOrigin);
+    return [[lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]];
+  }
+
+  /** Orbit, pan and zoom on or off (off while drawing a slice). */
+  setInteractive(on: boolean) { this.controls.enabled = on; }
 
   /** Bounds of the currently shown points (union of shown cloud boxes), scene coordinates. */
   shownBounds(): THREE.Box3 | null {
@@ -144,13 +174,27 @@ export class CloudRenderer {
     this.draw();
   }
 
+  private updateGrid() {
+    if (this.grid) { this.scene.remove(this.grid); this.grid.geometry.dispose(); (this.grid.material as THREE.Material).dispose(); this.grid = null; }
+    if (this.mode === 'persp' || !this.worldOrigin) return;
+    const span = Math.ceil(this.sceneSpan() * 1.5 / 10) * 10;
+    this.grid = new THREE.GridHelper(span, span, 0x3a4048, 0x2a2f35);
+    this.grid.rotation.x = Math.PI / 2; // XY plane
+    this.grid.position.z = -this.worldOrigin.z; // world z = 0
+    (this.grid.material as THREE.Material).transparent = true;
+    (this.grid.material as THREE.Material).opacity = 0.6;
+    this.scene.add(this.grid);
+  }
+
   setView(mode: ViewMode, flipped = false) {
     const previousTarget = this.controls.target.clone();
     const previousDistance = this.controls.object.position.distanceTo(previousTarget);
     this.mode = mode;
     this.flipped = flipped;
+    const wasEnabled = this.controls.enabled;
     this.controls.dispose();
     this.controls = this.makeControls(this.camera);
+    this.controls.enabled = wasEnabled;
     this.controls.target.copy(previousTarget);
     if (mode === 'persp') {
       this.controls.enableRotate = true;
@@ -167,6 +211,7 @@ export class CloudRenderer {
       this.ortho.lookAt(previousTarget);
     }
     this.controls.update();
+    this.updateGrid();
     this.frameVisible(mode === 'persp' ? undefined : true);
   }
 
@@ -200,6 +245,7 @@ export class CloudRenderer {
     this.controls.target.copy(center);
     this.controls.update();
     this.draw();
+    this.onChange?.();
   }
 
   private size() {
@@ -267,6 +313,7 @@ export class CloudRenderer {
   }
 
   dispose() {
+    if (this.grid) { this.scene.remove(this.grid); this.grid.geometry.dispose(); (this.grid.material as THREE.Material).dispose(); }
     cancelAnimationFrame(this.raf);
     this.observer.disconnect();
     this.controls.dispose();

@@ -70,3 +70,27 @@ def test_export_slices_writes_union_once_with_colors(tmp_path):
         export_slices(spec)
     with pytest.raises(ValueError):
         export_slices({**spec, "output": str(tmp_path / "none.las"), "sources": [{"path": str(source), "boxes": [[[900, 900, 900], [901, 901, 901]]]}]})
+
+
+def test_export_slices_applies_orientation_transform(tmp_path):
+    from s20_pipeline.desktop import export_slices
+
+    source = tmp_path / "tilted.las"
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scales = np.full(3, 0.001)
+    data = laspy.LasData(header)
+    data.x = np.array([0.0, 10.0, 20.0])
+    data.y = np.zeros(3)
+    data.z = np.zeros(3)
+    data.red = data.green = data.blue = np.zeros(3, dtype="u2")
+    data.write(source)
+    # Rotate 90 degrees about z around origin (10,0,0): x -> y. Point at x=20 lands at y=10.
+    rot = [0, -1, 0, 1, 0, 0, 0, 0, 1]
+    spec = {
+        "output": str(tmp_path / "rotated.las"),
+        "sources": [{"path": str(source), "boxes": [[[9, 9, -1], [11, 11, 1]]], "transform": {"rotation": rot, "origin": [10, 0, 0], "translation": [0, 0, 0.5]}}],
+    }
+    result = export_slices(spec)
+    out = laspy.read(spec["output"])
+    assert result["points"] == 1
+    assert np.allclose([out.x[0], out.y[0], out.z[0]], [10, 10, 0.5], atol=1e-3)

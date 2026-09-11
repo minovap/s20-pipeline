@@ -1,10 +1,11 @@
 // Full-window point cloud viewer with axis-locked views, box slices and export.
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ChevronLeft, Columns2, Crop, FlipHorizontal2, Maximize, PanelRightClose, PanelRightOpen} from 'lucide-react';
+import {IDENTITY, isIdentity, levelGround, transformFor} from './orient';
 import {api, errorText, listen} from '../api';
 import {basename, bytes, count, when} from '../format';
 import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, useContextMenu} from '../ui';
-import type {Box, Cloud, ExportEvent, Project, Slice} from '../types';
+import type {Box, Cloud, ExportEvent, Orientation, Project, Slice} from '../types';
 import {CloudRenderer, DEPTH_AXIS, type ViewMode} from './render';
 import {children, countMask, descendants, effectiveBox, intersect, newId, nextSliceName, normalize, unionMask} from './slices';
 
@@ -50,6 +51,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     return list;
   }, [project]);
   const slices = project?.slices ?? [];
+  const orientations = project?.orientations ?? {};
 
   const initialised = useRef(false);
   useEffect(() => {
@@ -104,7 +106,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     const r = renderer.current;
     if (!r) return;
     r.setClouds(clouds);
-  }, [clouds]);
+    for (const path of clouds.keys()) r.setOrientation(path, orientations[path] ?? IDENTITY);
+  }, [clouds, orientations]);
+  useEffect(() => { renderer.current?.setInteractive(!(slicing && mode !== 'persp')); }, [slicing, mode]);
 
   // ---- visibility masks: a checked cloud shows everything; otherwise the union of its checked slices
   useEffect(() => {
@@ -114,11 +118,11 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       if (checked.has(source)) { r.setMask(source, null); continue; }
       const boxes = slices.filter(s => s.source === source && checked.has(s.id)).map(s => effectiveBox(s, slices)).filter((b): b is Box => !!b);
       if (!boxes.length) { r.setMask(source, new Float32Array(cloud.data.length / 6)); continue; }
-      r.setMask(source, unionMask(cloud.data, cloud.info.origin, boxes));
+      r.setMask(source, unionMask(cloud.data, cloud.info.origin, boxes, transformFor(orientations[source], cloud.info.origin)));
     }
     // Frame the first thing that becomes visible, after its mask is in place.
     if (firstFrame.current && clouds.size) { firstFrame.current = false; r.frameVisible(); }
-  }, [checked, slices, clouds]);
+  }, [checked, slices, clouds, orientations]);
 
   const selectedSlice = slices.find(s => s.id === selected) ?? null;
   useEffect(() => { renderer.current?.setOutline(selectedSlice ? effectiveBox(selectedSlice, slices) : null); }, [selectedSlice, slices]);
@@ -128,10 +132,10 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     for (const s of slices) {
       const cloud = clouds.get(s.source);
       const box = effectiveBox(s, slices);
-      if (cloud && box) out.set(s.id, countMask(unionMask(cloud.data, cloud.info.origin, [box])));
+      if (cloud && box) out.set(s.id, countMask(unionMask(cloud.data, cloud.info.origin, [box], transformFor(orientations[s.source], cloud.info.origin))));
     }
     return out;
-  }, [slices, clouds]);
+  }, [slices, clouds, orientations]);
 
   // ---- persistence
   async function saveSlices(next: Slice[]) {
@@ -150,10 +154,14 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const targetName = sliceTarget ? (sliceTarget.parent?.name ?? sources.find(s => s.path === sliceTarget.source)?.name ?? '') : '';
 
   function worldBoxOf(source: string): Box | null {
-    const cloud = clouds.get(source);
-    if (!cloud) return null;
-    const o = cloud.info.origin, b = cloud.info.bounds;
-    return [[b[0][0] + o[0], b[0][1] + o[1], b[0][2] + o[2]], [b[1][0] + o[0], b[1][1] + o[1], b[1][2] + o[2]]];
+    return renderer.current?.worldBounds(source) ?? null;
+  }
+  async function saveOrientation(source: string, o: Orientation) {
+    if (!project) return;
+    const next = {...orientations};
+    if (isIdentity(o)) delete next[source]; else next[source] = o;
+    setProject(p => (p ? {...p, orientations: next} : p));
+    try { await api.writeProject(project.path, {orientations: next}); } catch (e) { onError(errorText(e)); }
   }
 
   function startSlicing() {
@@ -216,7 +224,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       if (!box) { onError(`${slice?.name ?? basename(id)} is not loaded yet.`); return null; }
       groups.set(source, [...(groups.get(source) ?? []), box]);
     }
-    return [...groups].map(([p, boxes]) => ({path: p, boxes}));
+    return [...groups].map(([p, boxes]) => ({path: p, boxes, transform: transformFor(orientations[p], clouds.get(p)?.info.origin ?? [0, 0, 0])}));
   }
   const labelFor = (id: string) => slices.find(s => s.id === id)?.name ?? sources.find(s => s.path === id)?.name ?? basename(id);
   function startExport(ids: string[]) {
@@ -304,8 +312,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       <div className={'canvas-host' + (drawing ? ' drawing' : '')} ref={host}
         onPointerDown={e => { if (!drawing || e.button !== 0) return; const r = host.current!.getBoundingClientRect(); setRect({x0: e.clientX - r.left, y0: e.clientY - r.top, x1: e.clientX - r.left, y1: e.clientY - r.top}); (e.target as HTMLElement).setPointerCapture?.(e.pointerId); }}
         onPointerMove={e => { if (!rect) return; const r = host.current!.getBoundingClientRect(); setRect({...rect, x1: e.clientX - r.left, y1: e.clientY - r.top}); }}
-        onPointerUp={() => { if (!rect) return; const r = rect; setRect(null); finishRect(r); }}
-        onPointerDownCapture={e => { if (drawing && e.button === 0) e.stopPropagation(); }}>
+        onPointerUp={() => { if (!rect) return; const r = rect; setRect(null); finishRect(r); }}>
         <canvas ref={canvas} />
         {rect && <div className="rubber" style={{left: Math.min(rect.x0, rect.x1), top: Math.min(rect.y0, rect.y1), width: Math.abs(rect.x1 - rect.x0), height: Math.abs(rect.y1 - rect.y0)}} />}
         {compare && <div className="compare-labels"><span>{sources.filter(s => checked.has(s.path) && s.path !== compare).map(s => s.name).join(', ') || 'Slices'}</span><span>{labelFor(compare)}</span></div>}
@@ -354,6 +361,10 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
             {!sources.length && <p className="muted pad">Nothing to show yet.</p>}
           </div>
           {selectedSlice && <BoundsEditor slice={selectedSlice} onChange={box => updateBox(selectedSlice, box)} />}
+          {selected && !selectedSlice && clouds.has(selected) && (
+            <OrientationEditor orientation={orientations[selected] ?? IDENTITY} onChange={o => saveOrientation(selected, o)}
+              onLevel={() => { const o = levelGround(clouds.get(selected)!.data, orientations[selected] ?? IDENTITY); if (o) void saveOrientation(selected, o); else onError('No dominant ground plane found. Adjust roll and pitch by hand.'); }} />
+          )}
           <footer>
             {exporting ? (
               <div className="export-progress">
@@ -425,6 +436,33 @@ function BoundsEditor({slice, onChange}: {slice: Slice; onChange: (box: Box) => 
           <span className="unit">m</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function OrientationEditor({orientation, onChange, onLevel}: {orientation: Orientation; onChange: (o: Orientation) => void; onLevel: () => void}) {
+  const fields: {label: string; get: () => number; set: (v: number) => Orientation; step: number; unit: string}[] = [
+    {label: 'Roll', get: () => orientation.rotation[0], set: v => ({...orientation, rotation: [v, orientation.rotation[1], orientation.rotation[2]]}), step: 0.1, unit: '°'},
+    {label: 'Pitch', get: () => orientation.rotation[1], set: v => ({...orientation, rotation: [orientation.rotation[0], v, orientation.rotation[2]]}), step: 0.1, unit: '°'},
+    {label: 'Yaw', get: () => orientation.rotation[2], set: v => ({...orientation, rotation: [orientation.rotation[0], orientation.rotation[1], v]}), step: 0.5, unit: '°'},
+    {label: 'Height', get: () => orientation.translation[2], set: v => ({...orientation, translation: [orientation.translation[0], orientation.translation[1], v]}), step: 0.01, unit: 'm'},
+  ];
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  useEffect(() => { setDraft({}); }, [orientation]);
+  return (
+    <div className="bounds orientation">
+      <h3>Orientation</h3>
+      <div className="row"><button onClick={onLevel}>Level ground</button><button onClick={() => onChange(IDENTITY)} disabled={isIdentity(orientation)}>Reset</button></div>
+      {fields.map(f => (
+        <div className="axis" key={f.label}><span>{f.label}</span>
+          <input value={draft[f.label] ?? String(f.get())} onChange={e => setDraft(d => ({...d, [f.label]: e.target.value}))}
+            onBlur={() => { const v = Number(draft[f.label]); if (draft[f.label] != null && isFinite(v)) onChange(f.set(v)); else setDraft(d => ({...d, [f.label]: undefined as unknown as string})); }}
+            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); onChange(f.set(Math.round((f.get() + (e.key === 'ArrowUp' ? f.step : -f.step)) * 1000) / 1000)); } }}
+            aria-label={f.label} />
+          <span className="unit">{f.unit}</span>
+        </div>
+      ))}
+      <small className="muted">Level ground fits the largest flat area and sets it to height 0. Arrow keys nudge a value.</small>
     </div>
   );
 }

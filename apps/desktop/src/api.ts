@@ -19,7 +19,7 @@ const real = {
   listProjects: () => invoke<ProjectSummary[]>('list_projects'),
   createProject: (name: string) => invoke<Project>('create_project', {name}),
   openProject: (path: string) => invoke<Project>('open_project', {path}),
-  writeProject: (path: string, project: Partial<Pick<Project, 'name' | 'inputs' | 'clouds' | 'slices'>>) => invoke<Project>('write_project', {path, project}),
+  writeProject: (path: string, project: Partial<Pick<Project, 'name' | 'inputs' | 'clouds' | 'slices' | 'orientations'>>) => invoke<Project>('write_project', {path, project}),
   addInput: (project: string, capture: string) => invoke<Project>('add_input', {project, capture}),
   inputAvailable: (path: string) => invoke<boolean>('input_available', {path}),
   readStageLog: (run: string, stage: string) => invoke<string>('read_stage_log', {run, stage}),
@@ -29,7 +29,7 @@ const real = {
   startJob: (options: Job) => invoke<void>('start_job', {options}),
   cancelJob: () => invoke<void>('cancel_job'),
 
-  exportSlices: (spec: {output: string; sources: {path: string; boxes: Box[]}[]; allow_outside?: boolean}) => invoke<string>('export_slices', {spec}),
+  exportSlices: (spec: {output: string; sources: {path: string; boxes: Box[]; transform?: {rotation: number[]; origin: number[]; translation: number[]} | null}[]; allow_outside?: boolean}) => invoke<string>('export_slices', {spec}),
   cancelExport: () => invoke<void>('cancel_export'),
 
   loadPreview: (source: string, budget: number) => invoke<Preview>('load_preview', {source, budget}),

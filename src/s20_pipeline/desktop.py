@@ -147,7 +147,10 @@ def _chunks(source):
 def export_slices(spec):
     """Write points inside the union of boxes per source to one LAS file.
 
-    spec = {"output": path, "sources": [{"path": str, "boxes": [[[minx,miny,minz],[maxx,maxy,maxz]], ...]}]}
+    spec = {"output": path, "sources": [{"path": str, "boxes": [[[minx,miny,minz],[maxx,maxy,maxz]], ...],
+            "transform": {"rotation": [9 row-major], "origin": [3], "translation": [3]} | None}]}
+    An optional transform maps source points to the calibrated frame first
+    (world = R·(p - origin) + origin + t) and the file is written in that frame.
     A point is written once even when it lies inside several boxes of the same source.
     Progress lines are printed as JSON so the desktop app can show them.
     """
@@ -166,7 +169,15 @@ def export_slices(spec):
         if boxes.ndim != 3 or boxes.shape[1:] != (2, 3) or not np.isfinite(boxes).all():
             raise ValueError("Boxes must be [[min xyz],[max xyz]] triples")
         n, info, gen = _chunks(source)
-        sources.append((source, boxes, n, info, gen))
+        transform = item.get("transform")
+        if transform:
+            rotation = np.asarray(transform["rotation"], dtype="<f8").reshape(3, 3)
+            origin = np.asarray(transform["origin"], dtype="<f8")
+            shift = origin + np.asarray(transform["translation"], dtype="<f8")
+            if not (np.isfinite(rotation).all() and np.isfinite(shift).all()):
+                raise ValueError("Transform must be finite")
+            transform = (rotation, origin, shift)
+        sources.append((source, boxes, n, info, gen, transform))
         total += n
     if not sources:
         raise ValueError("Nothing to export")
@@ -185,8 +196,11 @@ def export_slices(spec):
     import time
 
     with laspy.open(temporary, mode="w", header=header) as writer:
-        for source, boxes, n, info, gen in sources:
+        for source, boxes, n, info, gen, transform in sources:
             for xyz, rgb in gen():
+                if transform:
+                    rotation, origin, shift = transform
+                    xyz = (xyz - origin) @ rotation.T + shift
                 mask = np.zeros(len(xyz), dtype=bool)
                 for low, high in boxes:
                     mask |= np.all((xyz >= low) & (xyz <= high), axis=1)

@@ -344,6 +344,9 @@ fn full_project(folder: &Path) -> Result<Value, String> {
     if !project["clouds"].is_array() {
         project["clouds"] = json!([]);
     }
+    if !project["orientations"].is_object() {
+        project["orientations"] = json!({});
+    }
     Ok(project)
 }
 
@@ -402,7 +405,7 @@ fn open_project(path: String, state: State<Engine>) -> Result<Value, String> {
 fn write_project(path: String, project: Value, state: State<Engine>) -> Result<Value, String> {
     let (folder, file) = project_file(&state, &path)?;
     let mut stored = read_json(&file).unwrap_or(json!({"schema":1}));
-    for key in ["name", "inputs", "clouds", "slices"] {
+    for key in ["name", "inputs", "clouds", "slices", "orientations"] {
         if !project[key].is_null() {
             stored[key] = project[key].clone();
         }

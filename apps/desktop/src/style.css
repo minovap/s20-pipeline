@@ -251,6 +251,9 @@ pre.log { margin: 0 16px 8px 48px; padding: 10px 12px; background: var(--bg); bo
 .bounds { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
 .bounds h3 { color: var(--muted); font-weight: 500; margin-bottom: 2px; }
 .bounds .axis { display: grid; grid-template-columns: 14px 1fr auto 1fr 14px; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.orientation .axis { grid-template-columns: 44px 1fr 14px; }
+.orientation .row { margin-bottom: 4px; }
+.orientation small { font-size: 11px; line-height: 1.4; }
 .bounds .axis > span { color: var(--muted); font-size: 12px; }
 .bounds input { padding: 3px 6px; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 .export-progress { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

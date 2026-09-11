@@ -35,6 +35,7 @@ let project: Project = {
     {id: 'b', name: 'Slice 1 1', source: completedRun.result!, parent: 'a', box: [[-12, -8, 0.8], [4, 6, 1.6]], created: now - 4000},
   ],
   runs: [cancelledRun, completedRun],
+  orientations: {},
 };
 const other: ProjectSummary = {path: `${root}/Driveway`, name: 'Driveway', created: now - 900000, input_count: 1, run_count: 3, last_run: {...completedRun, status: 'failed', started: now - 400000}};
 

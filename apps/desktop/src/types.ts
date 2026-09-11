@@ -31,11 +31,14 @@ export type Run = {
 export type Box = [[number, number, number], [number, number, number]];
 export type Slice = {id: string; name: string; source: string; parent: string | null; box: Box; created: number};
 export type ImportedCloud = {path: string; name: string; added: number};
+/** Rotation in degrees (roll about X, pitch about Y, yaw about Z; applied yaw·pitch·roll) about the cloud's preview origin, then a shift in metres. */
+export type Orientation = {rotation: [number, number, number]; translation: [number, number, number]};
 export type ExportFile = {path: string; name: string; bytes: number | null; modified: number | null};
 
 export type ProjectSummary = {path: string; name: string; created: number; input_count: number; run_count: number; last_run: Run | null};
 export type Project = {
   path: string; name: string; created: number; inputs: Input[]; clouds: ImportedCloud[]; slices: Slice[]; runs: Run[]; exports: ExportFile[];
+  orientations: Record<string, Orientation>;
 };
 
 export type Settings = {engine_root: string; engine_ready: boolean; projects_root: string; running: boolean};
