@@ -15,8 +15,8 @@ from .telemetry import hardware
 
 
 def preview(source, cache, budget):
-    if not 10000 <= budget <= 2000000:
-        raise ValueError("Preview point budget must be 10,000–2,000,000")
+    if not 10000 <= budget <= 8000000:
+        raise ValueError("Preview point budget must be 10,000–8,000,000")
     source = source.resolve(strict=True)
     key = hashlib.sha256(
         f"{source}:{source.stat().st_size}:{source.stat().st_mtime_ns}:{budget}".encode()

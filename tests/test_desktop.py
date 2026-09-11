@@ -29,7 +29,7 @@ def test_preview_is_bounded_preserves_source_and_world_coordinates(tmp_path):
     assert preview(source, tmp_path / "cache", 10000) == value
     assert digest(source) == before
     with pytest.raises(ValueError):
-        preview(source, tmp_path / "cache", 2000001)
+        preview(source, tmp_path / "cache", 8000001)
 
 
 def test_export_slices_writes_union_once_with_colors(tmp_path):

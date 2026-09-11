@@ -469,7 +469,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         <span className="sep" />
         <label className="size" title="Point size"><input type="range" min={0.6} max={4} step={0.1} value={pointSize} onChange={e => setPointSize(+e.target.value)} aria-label="Point size" /></label>
         <select value={budget} onChange={e => setBudget(+e.target.value)} aria-label="Points shown" title="How many points to show">
-          <option value={250000}>250 k points</option><option value={1000000}>1 M points</option><option value={2000000}>2 M points</option>
+          <option value={250000}>250 k points</option><option value={1000000}>1 M points</option><option value={2000000}>2 M points</option><option value={4000000}>4 M points</option><option value={8000000}>8 M points</option>
         </select>
         {loading.size > 0 && <Spinner />}
       </div>

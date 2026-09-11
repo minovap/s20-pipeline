@@ -56,7 +56,9 @@ export class CloudRenderer {
   private get camera(): THREE.Camera { return this.mode === 'persp' ? this.persp : this.ortho; }
 
   private makeControls(camera: THREE.Camera) {
-    const c = new OrbitControls(camera, this.host);
+    // Listen on the canvas only: overlays (slice handles, buttons) are
+    // siblings and must never be captured by the controls.
+    const c = new OrbitControls(camera, this.canvas);
     c.enableDamping = false;
     c.screenSpacePanning = true;
     c.zoomToCursor = true;

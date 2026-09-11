@@ -789,7 +789,7 @@ async fn load_preview(
 fn read_preview(key: String, state: State<Engine>) -> Result<tauri::ipc::Response, String> {
     let paths = state.previews.lock().map_err(|e| e.to_string())?;
     let p = paths.get(&key).ok_or("Preview expired; load again")?;
-    if fs::metadata(p).map_err(|e| e.to_string())?.len() > 48_000_000 {
+    if fs::metadata(p).map_err(|e| e.to_string())?.len() > 8_000_000 * 24 {
         return Err("Preview exceeds budget".into());
     }
     Ok(tauri::ipc::Response::new(
