@@ -274,3 +274,6 @@ pre.log { margin: 0 16px 8px 48px; padding: 10px 12px; background: var(--bg); bo
 .bounds input { padding: 3px 6px; font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 .export-progress { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .export-progress span { display: inline-flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+
+.crash { max-width: 720px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; color: var(--text); }
+.crash pre { font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; color: var(--muted); user-select: text; -webkit-user-select: text; max-height: 50vh; overflow: auto; }

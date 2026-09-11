@@ -207,7 +207,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     const handle = ((e.target as HTMLElement).dataset.handle as Handle | undefined) ?? null;
     if (handle && draft) drag.current = {handle, start: draft, origin: ptr};
     else { const d = {p1: ptr, p2: ptr}; setDraft(d); drag.current = {handle: 'br', start: d, origin: ptr}; }
-    host.current?.setPointerCapture(e.pointerId);
+    try { host.current?.setPointerCapture(e.pointerId); } catch { /* capture is a convenience only */ }
   }
   function onPointerMove(e: React.PointerEvent) {
     const d = drag.current;
@@ -229,7 +229,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   function onPointerUp(e: React.PointerEvent) {
     if (!drag.current) return;
     drag.current = null;
-    host.current?.releasePointerCapture(e.pointerId);
+    try { if (host.current?.hasPointerCapture(e.pointerId)) host.current.releasePointerCapture(e.pointerId); } catch { /* already released */ }
     setDraft(d => {
       if (!d) return d;
       const a = toScreen(d.p1), b = toScreen(d.p2);

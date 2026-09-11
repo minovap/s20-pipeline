@@ -174,4 +174,14 @@ function SettingsDialog({settings, busy, onChange, onClose, onError}: {settings:
   );
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+/** Last line of defence: show the error instead of a blank window. */
+class Boundary extends React.Component<{children: React.ReactNode}, {error: string}> {
+  state = {error: ''};
+  static getDerivedStateFromError(e: unknown) { return {error: e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e)}; }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <div className="center"><div className="crash"><h2>Something went wrong</h2><pre>{this.state.error}</pre><button className="primary" onClick={() => location.reload()}>Reload</button></div></div>;
+  }
+}
+
+createRoot(document.getElementById('root')!).render(<Boundary><App /></Boundary>);
