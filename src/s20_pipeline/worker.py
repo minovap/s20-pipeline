@@ -46,9 +46,11 @@ def execute(stage, job):
                 1,
                 "input",
                 100,
-                1,
+                0,  # far-observation diagnostics: unused downstream
                 1,
                 "gyro",
+                1,
+                0,  # whole-scan voxel map: unused downstream, costs memory
             ]
         )
     elif stage == "pose_refinement":

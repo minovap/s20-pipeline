@@ -1,6 +1,7 @@
 #include "stage_profile.hpp"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <dispatch/dispatch.h>
 
 #include <algorithm>
 #include <atomic>
@@ -131,14 +132,18 @@ bool point_inside_box_cpu(
         && box_minimum.z <= point.z && point.z <= box_maximum.z;
 }
 
-std::vector<RayRecord> prepare_ray_records(
+// Ray records for source points [begin, end). Called per batch so the
+// forty-byte records never exist for the whole cloud at once.
+void prepare_ray_records(
     const Cloud &source,
+    size_t begin,
+    size_t end,
     const Float4 &core_minimum,
     const Float4 &core_maximum,
-    bool clip_to_subfile
+    bool clip_to_subfile,
+    std::vector<RayRecord> &records
 ) {
-    std::vector<RayRecord> records;
-    records.reserve(clip_to_subfile ? source.points.size() / 2 : source.points.size());
+    records.clear();
     Float4 expanded_minimum = {
         core_minimum.x - 0.06f,
         core_minimum.y - 0.06f,
@@ -151,7 +156,7 @@ std::vector<RayRecord> prepare_ray_records(
         core_maximum.z + 0.06f,
         0.0f,
     };
-    for (size_t index = 0; index < source.points.size(); ++index) {
+    for (size_t index = begin; index < end; ++index) {
         const Float4 &endpoint = source.points[index];
         const Float4 &origin = source.origins[source.frame_ids[index]];
         if (!std::isfinite(endpoint.x) || !std::isfinite(endpoint.y)
@@ -195,8 +200,10 @@ std::vector<RayRecord> prepare_ray_records(
             distance, start_distance, endpoint_inside, 0u,
         });
     }
-    return records;
 }
+
+// Source points per ray batch: 16 M points is at most 640 MB of records.
+constexpr size_t kRayBatchPoints = 16u << 20;
 
 struct FilterResult {
     std::vector<uint8_t> noise_mask;
@@ -440,9 +447,8 @@ void append_pcd(Cloud &cloud, const fs::path &path, uint32_t frame, const Pose &
         curvature_offset = layout.offsets["curvature"];
     }
 
-    cloud.points.reserve(cloud.points.size() + layout.point_count);
-    cloud.frame_ids.reserve(cloud.frame_ids.size() + layout.point_count);
-    cloud.relative_times.reserve(cloud.relative_times.size() + layout.point_count);
+    // Capacity is reserved once by load_cloud from the PCD headers; an exact
+    // reserve here would reallocate and copy the whole cloud for every frame.
     for (size_t index = 0; index < layout.point_count; ++index) {
         const char *record = bytes.data() + index * layout.record_size;
         float x = read_scalar<float>(record + layout.offsets["x"]);
@@ -519,6 +525,21 @@ Cloud load_cloud(const Options &options) {
     } else {
         selected_start = std::max(selected_start, 0);
     }
+
+    // Size the cloud once from the headers so loading never reallocates.
+    size_t expected_points = 0;
+    size_t expected_frames = 0;
+    for (const auto &[frame, path] : scans) {
+        if (frame < selected_start || (selected_end >= 0 && frame > selected_end)) continue;
+        if (options.max_frames >= 0 && expected_frames >= static_cast<size_t>(options.max_frames)) break;
+        std::ifstream input(path, std::ios::binary);
+        if (!input) fail("cannot open scan: " + path.string());
+        expected_points += read_pcd_header(input, path).point_count;
+        ++expected_frames;
+    }
+    cloud.points.reserve(expected_points);
+    cloud.frame_ids.reserve(expected_points);
+    cloud.relative_times.reserve(expected_points);
 
     for (const auto &[frame, path] : scans) {
         if (frame < selected_start) {
@@ -1554,42 +1575,77 @@ struct SpatialSubfile {
     Cloud cloud;
 };
 
-std::vector<SpatialSubfile> divide_ray_subfiles(const Cloud &source) {
-    std::map<std::array<int, 3>, Cloud> divided;
-    for (size_t index = 0; index < source.points.size(); ++index) {
-        const Float4 &point = source.points[index];
-        std::array<std::vector<int>, 3> axes;
-        const float values[3] = {point.x, point.y, point.z};
-        for (size_t axis = 0; axis < 3; ++axis) {
-            int core = static_cast<int>(std::floor(values[axis] / kSubfileSize));
-            float lower = static_cast<float>(core) * kSubfileSize;
-            axes[axis].push_back(core);
-            if (values[axis] - lower < kSubfileHalo) {
-                axes[axis].push_back(core - 1);
-            }
-            if (lower + kSubfileSize - values[axis] < kSubfileHalo) {
-                axes[axis].push_back(core + 1);
-            }
+// Subfile coordinates a point contributes to: its core cell plus any
+// neighbour it lies within the halo of.
+void subfile_cells(const Float4 &point, std::array<std::vector<int>, 3> &axes) {
+    const float values[3] = {point.x, point.y, point.z};
+    for (size_t axis = 0; axis < 3; ++axis) {
+        axes[axis].clear();
+        int core = static_cast<int>(std::floor(values[axis] / kSubfileSize));
+        float lower = static_cast<float>(core) * kSubfileSize;
+        axes[axis].push_back(core);
+        if (values[axis] - lower < kSubfileHalo) {
+            axes[axis].push_back(core - 1);
         }
-        for (int x : axes[0]) {
-            for (int y : axes[1]) {
-                for (int z : axes[2]) {
-                    Cloud &part = divided[{x, y, z}];
-                    part.points.push_back(point);
-                    part.frame_ids.push_back(source.frame_ids[index]);
-                    part.relative_times.push_back(source.relative_times[index]);
-                }
-            }
+        if (lower + kSubfileSize - values[axis] < kSubfileHalo) {
+            axes[axis].push_back(core + 1);
         }
     }
+}
 
-    std::vector<SpatialSubfile> subfiles;
-    subfiles.reserve(divided.size());
-    for (auto &[coordinate, cloud] : divided) {
-        copy_cloud_metadata(source, cloud);
-        subfiles.push_back({coordinate, std::move(cloud)});
+// Every subfile coordinate with its point count, in the same order the
+// former all-at-once division produced.
+constexpr size_t kScanChunks = 32;
+
+std::map<std::array<int, 3>, size_t> list_ray_subfiles(const Cloud &source) {
+    std::vector<std::map<std::array<int, 3>, size_t>> partial(kScanChunks);
+    auto *partial_data = partial.data();
+    const size_t total = source.points.size();
+    const size_t step = (total + kScanChunks - 1) / kScanChunks;
+    dispatch_apply(kScanChunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t chunk) {
+        std::array<std::vector<int>, 3> axes;
+        auto &counts = partial_data[chunk];
+        for (size_t index = chunk * step; index < std::min(total, (chunk + 1) * step); ++index) {
+            subfile_cells(source.points[index], axes);
+            for (int x : axes[0]) for (int y : axes[1]) for (int z : axes[2]) ++counts[{x, y, z}];
+        }
+    });
+    std::map<std::array<int, 3>, size_t> counts;
+    for (const auto &part : partial) for (const auto &[key, count] : part) counts[key] += count;
+    return counts;
+}
+
+// One subfile (core plus halo), extracted on demand so only one exists at a time.
+Cloud extract_ray_subfile(const Cloud &source, const std::array<int, 3> &coordinate, size_t expected) {
+    const size_t total = source.points.size();
+    const size_t step = (total + kScanChunks - 1) / kScanChunks;
+    std::vector<std::vector<uint32_t>> members(kScanChunks);
+    auto *members_data = members.data();
+    dispatch_apply(kScanChunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t chunk) {
+        std::array<std::vector<int>, 3> axes;
+        auto &found = members_data[chunk];
+        for (size_t index = chunk * step; index < std::min(total, (chunk + 1) * step); ++index) {
+            subfile_cells(source.points[index], axes);
+            bool member = false;
+            for (int x : axes[0]) for (int y : axes[1]) for (int z : axes[2]) {
+                if (x == coordinate[0] && y == coordinate[1] && z == coordinate[2]) member = true;
+            }
+            if (member) found.push_back(static_cast<uint32_t>(index));
+        }
+    });
+    Cloud part;
+    part.points.reserve(expected);
+    part.frame_ids.reserve(expected);
+    part.relative_times.reserve(expected);
+    for (const auto &found : members) {
+        for (uint32_t index : found) {
+            part.points.push_back(source.points[index]);
+            part.frame_ids.push_back(source.frame_ids[index]);
+            part.relative_times.push_back(source.relative_times[index]);
+        }
     }
-    return subfiles;
+    copy_cloud_metadata(source, part);
+    return part;
 }
 
 bool belongs_to_subfile_core(
@@ -1701,23 +1757,12 @@ public:
                 fail("ray subfile contains no finite points");
             }
         }
-        std::vector<RayRecord> prepared_rays = prepare_ray_records(
-            rays, core_minimum, core_maximum, clip_to_subfile != 0u
-        );
-        if (prepared_rays.size() > std::numeric_limits<uint32_t>::max()) {
-            fail("prepared ray count exceeds the Metal kernel's uint32 index range");
-        }
-        uint32_t ray_count = static_cast<uint32_t>(prepared_rays.size());
         CpuHashTable hash = build_ray_hash(cloud.points, core_minimum);
         uint64_t capacity64 = hash.keys.size();
         uint32_t capacity = static_cast<uint32_t>(capacity64);
         uint32_t hash_mask = capacity - 1;
 
         id<MTLBuffer> points = make_buffer(cloud.points.data(), cloud.points.size() * sizeof(Float4), @"target points");
-        id<MTLBuffer> ray_records = make_buffer(
-            prepared_rays.data(), prepared_rays.size() * sizeof(RayRecord),
-            @"prepared Studio ray records"
-        );
         id<MTLBuffer> keys = make_buffer(hash.keys.data(), hash.keys.size() * sizeof(uint64_t), @"ray voxel keys");
         id<MTLBuffer> representatives = make_buffer(
             hash.representatives.data(), hash.representatives.size() * sizeof(Float4),
@@ -1739,15 +1784,35 @@ public:
         hash.representatives.shrink_to_fit();
 
         auto started = std::chrono::steady_clock::now();
-        dispatch(ray_pipeline_, ray_count, [&](id<MTLComputeCommandEncoder> encoder) {
-            [encoder setBuffer:ray_records offset:0 atIndex:0];
-            [encoder setBuffer:keys offset:0 atIndex:1];
-            [encoder setBuffer:representatives offset:0 atIndex:2];
-            [encoder setBuffer:scores offset:0 atIndex:3];
-            [encoder setBytes:&ray_count length:sizeof(ray_count) atIndex:4];
-            [encoder setBytes:&hash_mask length:sizeof(hash_mask) atIndex:5];
-            [encoder setBytes:&core_minimum length:sizeof(core_minimum) atIndex:6];
-        });
+        // Rays are streamed in batches; the score buffer accumulates across
+        // dispatches, so memory no longer scales with the whole cloud.
+        std::vector<RayRecord> prepared_rays;
+        prepared_rays.reserve(std::min(rays.points.size(), kRayBatchPoints));
+        for (size_t begin = 0; begin < rays.points.size(); begin += kRayBatchPoints) {
+            @autoreleasepool {
+                size_t end = std::min(rays.points.size(), begin + kRayBatchPoints);
+                prepare_ray_records(
+                    rays, begin, end, core_minimum, core_maximum, clip_to_subfile != 0u, prepared_rays
+                );
+                if (prepared_rays.empty()) continue;
+                uint32_t ray_count = static_cast<uint32_t>(prepared_rays.size());
+                id<MTLBuffer> ray_records = make_buffer(
+                    prepared_rays.data(), prepared_rays.size() * sizeof(RayRecord),
+                    @"prepared Studio ray records"
+                );
+                dispatch(ray_pipeline_, ray_count, [&](id<MTLComputeCommandEncoder> encoder) {
+                    [encoder setBuffer:ray_records offset:0 atIndex:0];
+                    [encoder setBuffer:keys offset:0 atIndex:1];
+                    [encoder setBuffer:representatives offset:0 atIndex:2];
+                    [encoder setBuffer:scores offset:0 atIndex:3];
+                    [encoder setBytes:&ray_count length:sizeof(ray_count) atIndex:4];
+                    [encoder setBytes:&hash_mask length:sizeof(hash_mask) atIndex:5];
+                    [encoder setBytes:&core_minimum length:sizeof(core_minimum) atIndex:6];
+                });
+            }
+        }
+        prepared_rays.clear();
+        prepared_rays.shrink_to_fit();
         result.ray_seconds = elapsed_seconds(started);
 
         started = std::chrono::steady_clock::now();
@@ -2166,19 +2231,24 @@ private:
     void dispatch(id<MTLComputePipelineState> pipeline, uint32_t count, Binder bind) {
         std::string profName=pipeline==ray_pipeline_?"ray_cast":pipeline==classify_pipeline_?"classify":pipeline==temporal_pipeline_?"temporal":pipeline==normal_pipeline_?"normals":pipeline==smooth_normal_pipeline_?"smooth_normals":"mls";
         prof::Scope phase(profName);
-        id<MTLCommandBuffer> command = [queue_ commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline];
-        bind(encoder);
-        NSUInteger width = std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup);
-        [encoder dispatchThreads:MTLSizeMake(count, 1, 1)
-           threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-        [encoder endEncoding];
-        [command commit];
-        [command waitUntilCompleted];
-        prof::gpu(profName,command.GPUEndTime-command.GPUStartTime,device_.currentAllocatedSize);
-        if (command.status == MTLCommandBufferStatusError) {
-            fail("Metal command failed: " + std::string(command.error.localizedDescription.UTF8String));
+        // Command buffers are autoreleased and retain every buffer they
+        // encode. Drain a pool per launch so finished subfiles free their
+        // GPU memory instead of holding it until the program exits.
+        @autoreleasepool {
+            id<MTLCommandBuffer> command = [queue_ commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];
+            bind(encoder);
+            NSUInteger width = std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup);
+            [encoder dispatchThreads:MTLSizeMake(count, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+            [encoder endEncoding];
+            [command commit];
+            [command waitUntilCompleted];
+            prof::gpu(profName,command.GPUEndTime-command.GPUStartTime,device_.currentAllocatedSize);
+            if (command.status == MTLCommandBufferStatusError) {
+                fail("Metal command failed: " + std::string(command.error.localizedDescription.UTF8String));
+            }
         }
     }
 
@@ -2199,7 +2269,7 @@ FilterResult run_partitioned_filter(
     bool deduplicate,
     bool ray_only
 ) {
-    std::vector<SpatialSubfile> subfiles = divide_ray_subfiles(cloud);
+    std::map<std::array<int, 3>, size_t> subfile_counts = list_ray_subfiles(cloud);
     FilterResult aggregate;
     aggregate.input_points = cloud.points.size();
     Cloud combined;
@@ -2207,10 +2277,8 @@ FilterResult run_partitioned_filter(
     std::vector<float> combined_scores;
     std::vector<Float4> combined_normals;
 
-    for (SpatialSubfile &subfile : subfiles) {
-        size_t raw_points = subfile.cloud.points.size();
+    for (const auto &[coordinate, raw_points] : subfile_counts) {
         aggregate.ray_subfile_input_points += raw_points;
-        const auto &coordinate = subfile.coordinate;
         std::cerr << "Ray subfile [" << coordinate[0] << "," << coordinate[1]
                   << "," << coordinate[2] << "] points=" << raw_points;
         if (raw_points < kMinimumRaySubfilePoints) {
@@ -2220,6 +2288,8 @@ FilterResult run_partitioned_filter(
         }
         std::cerr << "\n";
         ++aggregate.ray_subfile_count;
+        @autoreleasepool {
+        SpatialSubfile subfile{coordinate, extract_ray_subfile(cloud, coordinate, raw_points)};
         FilterResult part = filter.run(
             subfile.cloud,
             ray_only ? false : deduplicate,
@@ -2264,6 +2334,7 @@ FilterResult run_partitioned_filter(
         }
         std::cerr << "Ray subfile [" << coordinate[0] << "," << coordinate[1]
                   << "," << coordinate[2] << "] wrote=" << written_points << "\n";
+        }
     }
 
     cloud = std::move(combined);

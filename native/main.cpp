@@ -20,6 +20,12 @@
 #include "inertial.hpp"
 #include "plane_map.hpp"
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <exception>
+#include <limits>
 
 using Vec=Eigen::Vector3d;
 using Quat=Eigen::Quaterniond;
@@ -35,7 +41,7 @@ double seconds(Clock::time_point t){return std::chrono::duration<double>(Clock::
 Vec readvec(std::istream& f){Vec x;for(int j=0;j<3;++j)x[j]=read<double>(f);return x;}
 
 int main(int argc,char**argv){try{
- if(argc<3){std::cerr<<"Usage: s20_reconstruct raw.bin output_dir [threads=12] [limit=0] [voxel=.12] [output_voxel=.025] [min_frames=1] [centroid=0] [imu_shift=input] [export_range=30] [save_far_observations=0] [save_all_observations=0] [motion_model=gyro] [accel_scale_to_m_s2=1]\n";return 2;}
+ if(argc<3){std::cerr<<"Usage: s20_reconstruct raw.bin output_dir [threads=12] [limit=0] [voxel=.12] [output_voxel=.025] [min_frames=1] [centroid=0] [imu_shift=input] [export_range=30] [save_far_observations=0] [save_all_observations=0] [motion_model=gyro] [accel_scale=1] [save_map=1] [accel_scale_to_m_s2=1]\n";return 2;}
  const int threads=argc>3?std::stoi(argv[3]):12;
  const size_t limit=argc>4?std::stoul(argv[4]):0;
  const double voxel=argc>5?std::stod(argv[5]):.12;
@@ -50,6 +56,8 @@ int main(int argc,char**argv){try{
  const bool use_iekf=motion_model=="inertial_iekf";
  const bool full_inertial=motion_model!="gyro";
  const double accel_scale=argc>14?std::stod(argv[14]):1.;
+ // The whole-scan voxel map is a diagnostic; later stages read observations only.
+ const bool save_map=argc>15?std::stoi(argv[15])!=0:true;
  if(!std::isfinite(accel_scale)||accel_scale<=0||accel_scale>100)throw std::runtime_error("Invalid acceleration scale");
  if(!std::isfinite(export_range)||export_range<30||export_range>200)throw std::runtime_error("Invalid export range");
  if(threads<1||threads>128||!std::isfinite(voxel)||voxel<=0||!std::isfinite(output_voxel)||output_voxel<=0||min_frames<1||centroid<0||centroid>1||(!centroid&&min_frames!=1))throw std::runtime_error("Invalid configuration");
@@ -106,16 +114,16 @@ int main(int argc,char**argv){try{
   auto hi=std::upper_bound(imu.begin(),imu.end(),time,[](double t,const Imu&m){return t<m.time;});
   const auto&lo=*(hi-1);return lo.q.slerp((time-lo.time)/(hi->time-lo.time),hi->q);
  };
- std::vector<Scan> scans;scans.reserve(nf);
- for(uint32_t i=0;i<nf;++i){
+ // Frames are read one at a time so memory does not grow with recording length.
+ double prev_scan_end=-std::numeric_limits<double>::infinity();
+ auto read_scan=[&](uint32_t i){
   Scan s;s.begin=read<double>(input);s.end=read<double>(input);auto n=read<uint32_t>(input);
-  if(n>1000000||!std::isfinite(s.begin)||!std::isfinite(s.end)||s.end<s.begin||(i&&s.begin<scans.back().end))throw std::runtime_error("Invalid scan");
+  if(n>1000000||!std::isfinite(s.begin)||!std::isfinite(s.end)||s.end<s.begin||(i&&s.begin<prev_scan_end))throw std::runtime_error("Invalid scan");
   s.points.resize(n);input.read(reinterpret_cast<char*>(s.points.data()),n*sizeof(Point));
   if(!input)throw std::runtime_error("Truncated scan");
   for(size_t j=0;j<s.points.size();++j)if((j&&s.points[j].offset<s.points[j-1].offset)||s.points[j].offset*1e-9>s.end-s.begin+1e-6)throw std::runtime_error("Invalid per-point acquisition time");
-  scans.push_back(std::move(s));
- }
- if(input.peek()!=std::char_traits<char>::eof())throw std::runtime_error("Trailing raw input data");
+  prev_scan_end=s.end;return s;
+ };
  const double load_seconds=seconds(begin);
  kiss_icp::Registration registration(100,1e-4,threads);
  kiss_icp::VoxelHashMap local(voxel,30.,20),global(output_voxel,1e9,1);
@@ -157,9 +165,35 @@ int main(int argc,char**argv){try{
   for(int r=0;r<18;++r)for(int c=0;c<18;++c)covariance_output<<",P"<<r<<"_"<<c;
   covariance_output<<"\n";
  }
+ // Observation records are built and written on one background thread so
+ // the next frame's registration overlaps this frame's export. Frame order
+ // is preserved by the single writer; the queue is bounded to cap memory.
+ struct ExportTask{size_t frame;std::vector<Point> raw;std::vector<Vec> points;std::vector<uint32_t> sample_ids;std::vector<float> ranges;std::vector<Vec> dense;observations::Header header;};
+ std::deque<ExportTask> export_queue;std::mutex export_mutex;std::condition_variable export_cv;bool export_done=false;std::exception_ptr export_error;
+ std::thread exporter;
+ struct ExporterGuard{std::thread&t;std::mutex&m;std::condition_variable&cv;bool&done;~ExporterGuard(){{std::lock_guard<std::mutex> lock(m);done=true;}cv.notify_all();if(t.joinable())t.join();}} exporter_guard{exporter,export_mutex,export_cv,export_done};
+ if(save_all)exporter=std::thread([&]{
+  try{
+   for(;;){
+    ExportTask task;
+    {std::unique_lock<std::mutex> lock(export_mutex);export_cv.wait(lock,[&]{return!export_queue.empty()||export_done;});
+     if(export_queue.empty())return;task=std::move(export_queue.front());export_queue.pop_front();}
+    export_cv.notify_all();
+    std::vector<observations::Record> records(task.points.size());
+    tsl::robin_map<kiss_icp::Voxel,uint32_t> first;first.reserve(task.points.size());
+    for(size_t j=0;j<task.points.size();++j){auto&r=records[j];const auto&raw=task.raw[task.sample_ids[j]];
+     for(int k=0;k<3;++k)r.xyz[k]=task.points[j][k];r.raw[0]=raw.x;r.raw[1]=raw.y;r.raw[2]=raw.z;r.range=task.ranges[j];
+     r.sample=task.sample_ids[j];r.offset_ns=raw.offset;r.intensity=raw.intensity;r.tag=raw.tag;r.line=raw.line;
+     first.try_emplace(kiss_icp::PointToVoxel(task.points[j],output_voxel),uint32_t(j));
+    }
+    for(size_t rank=0;rank<task.dense.size();++rank)records[first.at(kiss_icp::PointToVoxel(task.dense[rank],output_voxel))].export_rank=uint32_t(rank);
+    std::ostringstream name;name<<std::setw(6)<<std::setfill('0')<<task.frame<<".s20obs";observations::write(output/"observations"/name.str(),task.header,records);
+   }
+  }catch(...){std::lock_guard<std::mutex> lock(export_mutex);export_error=std::current_exception();export_done=true;export_cv.notify_all();}
+ });
  auto tracking_start=Clock::now();
- for(size_t i=0;i<scans.size();++i){
-  if(limit&&processed>=limit)break;const auto&s=scans[i];
+ for(size_t i=0;i<nf;++i){
+  if(limit&&processed>=limit)break;Scan s=read_scan(uint32_t(i));const size_t raw_count=s.points.size();
   if(s.begin<imu.front().time||s.end>imu.back().time){++missing_imu;continue;}
   auto tick=Clock::now();Pose guess=last;
   if(!full_inertial&&prev_time>=0){
@@ -189,8 +223,9 @@ int main(int argc,char**argv){try{
    Vec q(p.x,p.y,p.z);double r2=q.squaredNorm();
    if(!q.allFinite()||r2<.25||r2>export_range*export_range||(p.tag&0x30)!=0)continue;
    if(save_all)sample_ids.push_back(uint32_t(sample));
-   points.push_back(q);times.push_back(s.begin+double(p.offset)*1e-9);near.push_back(r2<=900);ranges.push_back(std::sqrt(r2));far_count+=r2>900;
+   points.push_back(q);times.push_back(s.begin+double(p.offset)*1e-9);near.push_back(r2<=900);ranges.push_back(float(std::sqrt(r2)));far_count+=r2>900;
   }
+  const size_t point_count=points.size();
   const Quat end_inv=attitude(s.end).conjugate();
   const Vec local_velocity=guess.so3().inverse()*velocity;
   tbb::parallel_for(size_t(0),points.size(),[&](size_t j){
@@ -254,18 +289,6 @@ int main(int argc,char**argv){try{
   }
   if(use_iekf)planes.add(down,current,i);
   auto dense=kiss_icp::VoxelDownsample(points,output_voxel);
-  if(save_all){
-   std::vector<observations::Record> records(points.size());
-   tsl::robin_map<kiss_icp::Voxel,uint32_t> first;first.reserve(points.size());
-   for(size_t j=0;j<points.size();++j){auto&r=records[j];const auto&raw=s.points[sample_ids[j]];
-    for(int k=0;k<3;++k)r.xyz[k]=points[j][k];r.raw[0]=raw.x;r.raw[1]=raw.y;r.raw[2]=raw.z;r.range=ranges[j];
-    r.sample=sample_ids[j];r.offset_ns=raw.offset;r.intensity=raw.intensity;r.tag=raw.tag;r.line=raw.line;
-    first.try_emplace(kiss_icp::PointToVoxel(points[j],output_voxel),uint32_t(j));
-   }
-   for(size_t rank=0;rank<dense.size();++rank)records[first.at(kiss_icp::PointToVoxel(dense[rank],output_voxel))].export_rank=uint32_t(rank);
-   observations::Header h;h.origin=origin;h.frame=uint32_t(i);h.raw_count=uint32_t(s.points.size());h.count=uint32_t(points.size());h.export_count=uint32_t(dense.size());h.begin=s.begin;h.end=s.end;h.pose=current;h.local_velocity=local_velocity;h.imu_shift=imu_shift;
-   std::ostringstream name;name<<std::setw(6)<<std::setfill('0')<<i<<".s20obs";observations::write(output/"observations"/name.str(),h,records);
-  }
   // Optional diagnostic records: XYZ float32, raw frame uint32, range float32,
   // relative point time float32. These observations never feed tracking/fusion.
   if(save_far)for(size_t j=0;j<points.size();++j)if(ranges[j]>=10){
@@ -273,24 +296,37 @@ int main(int argc,char**argv){try{
    observations.write(reinterpret_cast<char*>(p.data()),12);observations.write(reinterpret_cast<char*>(&frame),4);
    observations.write(reinterpret_cast<char*>(&ranges[j]),4);observations.write(reinterpret_cast<char*>(&time),4);
   }
-  tbb::parallel_for(size_t(0),dense.size(),[&](size_t j){dense[j]=current*dense[j];});
-  if(centroid){
-   for(const auto&p:dense){
-    auto&cell=fused[kiss_icp::PointToVoxel(p,output_voxel)];
-    cell.sum+=p;++cell.samples;
-    if(cell.last_frame!=i){++cell.frames;cell.last_frame=i;}
-   }
-  }else global.AddPoints(dense);
+  if(save_map){
+   std::vector<Vec> world(dense.size());
+   tbb::parallel_for(size_t(0),dense.size(),[&](size_t j){world[j]=current*dense[j];});
+   if(centroid){
+    for(const auto&p:world){
+     auto&cell=fused[kiss_icp::PointToVoxel(p,output_voxel)];
+     cell.sum+=p;++cell.samples;
+     if(cell.last_frame!=i){++cell.frames;cell.last_frame=i;}
+    }
+   }else global.AddPoints(world);
+  }
+  if(save_all){
+   observations::Header h;h.origin=origin;h.frame=uint32_t(i);h.raw_count=uint32_t(s.points.size());h.count=uint32_t(points.size());h.export_count=uint32_t(dense.size());h.begin=s.begin;h.end=s.end;h.pose=current;h.local_velocity=local_velocity;h.imu_shift=imu_shift;
+   std::unique_lock<std::mutex> lock(export_mutex);
+   export_cv.wait(lock,[&]{return export_queue.size()<4||export_done;});
+   if(export_error)std::rethrow_exception(export_error);
+   export_queue.push_back(ExportTask{i,std::move(s.points),std::move(points),std::move(sample_ids),std::move(ranges),std::move(dense),h});
+   lock.unlock();export_cv.notify_all();
+  }
   const auto&t=current.translation();const auto&q=current.unit_quaternion();
   trajectory<<s.end<<" "<<t.x()<<" "<<t.y()<<" "<<t.z()<<" "<<q.x()<<" "<<q.y()<<" "<<q.z()<<" "<<q.w()<<"\n";
-  metrics<<i<<","<<s.end<<","<<s.points.size()<<","<<points.size()<<","<<source.size()<<","<<seconds(tick)<<","<<correction.translation().norm()<<","<<correction.so3().log().norm()*180/M_PI<<","<<sigma<<"\n";
+  metrics<<i<<","<<s.end<<","<<raw_count<<","<<point_count<<","<<source.size()<<","<<seconds(tick)<<","<<correction.translation().norm()<<","<<correction.so3().log().norm()*180/M_PI<<","<<sigma<<"\n";
   state_table::State state;state.frame=uint32_t(i);state.time=s.end;state.pose=current;
   state.known=state_table::Velocity|state_table::GyroBias;state.velocity=velocity;state.gyro_bias=bias;
   if(use_iekf)state.gyro_bias=anchor.gyro_bias;
   state_output.states.push_back(state);
-  last=current;prev_time=s.end;valid_count+=points.size();++processed;
+  last=current;prev_time=s.end;valid_count+=point_count;++processed;
   if(processed%50==0)std::cout<<processed<<"/"<<nf<<" frames; "<<seconds(tracking_start)<<"s; position "<<t.transpose()<<std::endl;
  }
+ if(!limit&&input.peek()!=std::char_traits<char>::eof())throw std::runtime_error("Trailing raw input data");
+ if(save_all){{std::lock_guard<std::mutex> lock(export_mutex);export_done=true;}export_cv.notify_all();exporter.join();if(export_error)std::rethrow_exception(export_error);}
  state_table::write(output/"states.s20state",state_output);
  if(full_inertial){
   state_table::write(output/"inertial-states.s20state",inertial_output);
@@ -320,9 +356,11 @@ int main(int argc,char**argv){try{
    else ++rejected_voxels;
   }
  }
- std::ofstream ply(output/"reconstructed.ply",std::ios::binary);
- ply<<"ply\nformat binary_little_endian 1.0\ncomment Native S20 prototype; raw LiDAR/IMU only\nelement vertex "<<cloud.size()<<"\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
- for(const auto&p:cloud){Eigen::Vector3f q=p.cast<float>();ply.write(reinterpret_cast<const char*>(q.data()),12);}ply.close();
+ if(save_map){
+  std::ofstream ply(output/"reconstructed.ply",std::ios::binary);
+  ply<<"ply\nformat binary_little_endian 1.0\ncomment Native S20 prototype; raw LiDAR/IMU only\nelement vertex "<<cloud.size()<<"\nproperty float x\nproperty float y\nproperty float z\nend_header\n";
+  for(const auto&p:cloud){Eigen::Vector3f q=p.cast<float>();ply.write(reinterpret_cast<const char*>(q.data()),12);}ply.close();
+ }
  std::ofstream report(output/"run.json");
  report<<std::setprecision(12)<<"{\n  \"engine\": \"C++20 ARM64 configurable IMU-deskew + KISS-ICP 1.3.0\",\n"
        <<"  \"motion_model\": \""<<motion_model<<"\",\n"
@@ -332,7 +370,7 @@ int main(int argc,char**argv){try{
        <<"  \"calibration_imu_time_shift_seconds\": "<<calibration_imu_shift<<",\n  \"export_max_range_m\": "<<export_range<<",\n  \"tracking_max_range_m\":30,\n  \"export_returns_beyond_tracking_range\":"<<far_count<<",\n"
        <<"  \"gyro_bias\": ["<<bias.x()<<","<<bias.y()<<","<<bias.z()<<"],\n"
        <<"  \"threads\": "<<threads<<",\n  \"registration_voxel_m\": "<<voxel<<",\n  \"output_voxel_m\": "<<output_voxel<<",\n"
-       <<"  \"centroid_fusion\": "<<(centroid?"true":"false")<<",\n  \"min_observation_frames\": "<<min_frames<<",\n  \"rejected_voxels\": "<<rejected_voxels<<",\n"
+       <<"  \"map_saved\": "<<(save_map?"true":"false")<<",\n  \"centroid_fusion\": "<<(centroid?"true":"false")<<",\n  \"min_observation_frames\": "<<min_frames<<",\n  \"rejected_voxels\": "<<rejected_voxels<<",\n"
        <<"  \"frames\": "<<processed<<",\n  \"valid_points\": "<<valid_count<<",\n  \"output_points\": "<<cloud.size()<<",\n"
        <<"  \"input_load_seconds\": "<<load_seconds<<",\n  \"tracking_and_map_seconds\": "<<tracking_seconds<<",\n  \"total_seconds\": "<<seconds(begin)<<"\n}\n";
  std::cout<<"Saved "<<cloud.size()<<" points in "<<seconds(begin)<<" seconds\n";
