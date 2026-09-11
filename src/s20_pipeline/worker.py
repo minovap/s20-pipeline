@@ -117,6 +117,12 @@ def execute(stage, job):
             cfg["color_workers"],
             cfg["chunk_points"],
             progress,
+            cfg.get("collector", "cpu"),
+            native / "libs20_collector.dylib" if cfg.get("collector", "cpu") == "metal" else None,
+            Path(job["native_sources"]) / "collector.metal"
+            if cfg.get("collector", "cpu") == "metal"
+            else None,
+            cfg.get("collector_diagnostics", False),
         )
     elif stage in ("global", "local"):
         from .camera import load_camera_frames

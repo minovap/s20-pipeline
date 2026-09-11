@@ -50,6 +50,8 @@ Photo extraction and person masks run beside the geometry stages; camera calibra
 | `--mask person/off` | person | LR-ASPP person exclusion; off can retain people/operators. No glass-class claim. |
 | `--mask-device mps/cpu` | mps | Same segmentation model on selected backend. No silent CPU fallback. |
 | `--exposure local/global/off` | local | Spatial per-photo offsets, per-photo constant offsets, or no exposure correction. Consensus blending remains enabled. |
+| `--collector cpu/metal` | cpu | CPU reference or opt-in Metal projection/depth/visibility collector. Metal requires macOS 15/Metal 3.2 and is faster on the indoor benchmark, but can produce sparse downstream color-threshold differences. |
+| `--collector-diagnostics` | off | With the Metal collector, compare per-photo depth keys, blockers and visibility flags against the CPU reference. This is expensive and intended for validation. |
 | `--blend metal/cpu` | metal | Metal consensus kernel or independent NumPy reference. |
 | `--no-pose-refinement` | Refinement enabled | Skip the native frozen-plane correction; keep tracked poses. |
 | `--no-color` | Color enabled | Stop after full Metal geometry processing. |

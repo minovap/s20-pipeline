@@ -77,6 +77,16 @@ def parser():
         c.add_argument("--mask", choices=["person", "off"], default="person")
         c.add_argument("--mask-device", choices=["mps", "cpu"], default="mps")
         c.add_argument("--exposure", choices=["local", "global", "off"], default="local")
+        c.add_argument(
+            "--collector",
+            choices=["metal", "cpu"],
+            help="Candidate collector (default: cpu; Metal is validated but opt-in)",
+        )
+        c.add_argument(
+            "--collector-diagnostics",
+            action="store_true",
+            help="Compare Metal projection, packed depths, blockers and visibility with CPU",
+        )
         c.add_argument("--blend", choices=["metal", "cpu"], default="metal")
         c.add_argument("--pose-refinement", action=argparse.BooleanOptionalAction, default=True)
         c.add_argument("--color", action=argparse.BooleanOptionalAction, default=True)
@@ -91,6 +101,18 @@ def parser():
             help="Verify all input/code/output hashes before reusing completed stages",
         )
     return p
+
+
+def selected_collector(args):
+    """Choose the new default without silently changing historical resumes."""
+    if args.collector is not None:
+        return args.collector
+    if args.resume:
+        receipt = args.output.resolve() / "job.json"
+        if receipt.is_file():
+            previous = json.loads(receipt.read_text())
+            return previous.get("options", {}).get("collector", "cpu")
+    return "cpu"
 
 
 def prepare_job(args):
@@ -118,6 +140,7 @@ def prepare_job(args):
             "mask",
             "mask_device",
             "exposure",
+            "collector_diagnostics",
             "blend",
             "pose_refinement",
             "color",
@@ -126,6 +149,7 @@ def prepare_job(args):
             "max_pose_gap",
         )
     }
+    options["collector"] = selected_collector(args)
     options.update(
         cpu_threads=args.cpu_threads if args.cpu_threads is not None else threads,
         color_workers=args.color_workers if args.color_workers is not None else workers,
@@ -204,6 +228,8 @@ def prepare_job(args):
         )
     if args.color and args.blend == "metal":
         needed += ["s20_blend"]
+    if args.color and options["collector"] == "metal":
+        needed += ["libs20_collector.dylib"]
     for name in needed:
         path = args.native_dir / name
         if not path.is_file():

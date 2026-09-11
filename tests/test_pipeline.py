@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from s20_pipeline.collect import minimum_depth_keys
 from s20_pipeline.estimate import estimate
 from s20_pipeline.exposure import Exposure
@@ -161,8 +162,9 @@ def test_metal_dynamic_field_and_numpy_agreement(tmp_path):
 
 
 def test_chunking_does_not_lose_foreground_occluder(tmp_path, monkeypatch):
-    import s20_pipeline.collect as module
     from PIL import Image
+
+    import s20_pipeline.collect as module
     from s20_pipeline.camera import CameraFrame, FisheyeCalibration
 
     image = tmp_path / "photo.jpg"
@@ -220,6 +222,7 @@ def test_cancel_terminates_worker_process_group():
     import sys
 
     import psutil
+
     from s20_pipeline.runner import stop
 
     child = subprocess.Popen(
@@ -291,16 +294,22 @@ def test_resume_identity_ignores_code_and_resource_changes():
     }
     after = {
         "output": "/o",
-        "options": {"color": True, "memory_gb": 64},
+        "options": {
+            "color": True,
+            "memory_gb": 64,
+            "collector": "cpu",
+            "collector_diagnostics": True,
+        },
         "python_code": {"a.py": "2"},
         "native_code": {"m.cpp": "1"},
         "source_identities": {
             "/x/all.bag": {"bytes": 1, "mtime_ns": 2},
             "/b/s20_reconstruct": "h2",
+            "/b/libs20_collector.dylib": "h3",
         },
     }
     assert resume_identity(before) == resume_identity(after)
-    assert code_changes(before, after) == ["a.py", "s20_reconstruct"]
+    assert code_changes(before, after) == ["a.py", "libs20_collector.dylib", "s20_reconstruct"]
     changed_input = {
         **after,
         "source_identities": {
@@ -309,3 +318,34 @@ def test_resume_identity_ignores_code_and_resource_changes():
         },
     }
     assert resume_identity(before) != resume_identity(changed_input)
+
+
+def test_collector_default_preserves_historical_resume(tmp_path):
+    from s20_pipeline.cli import parser, selected_collector
+
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "job.json").write_text('{"options": {"color": false}}')
+    historical = parser().parse_args(
+        ["run", str(tmp_path / "capture"), "--output", str(output), "--resume", "--no-color"]
+    )
+    assert selected_collector(historical) == "cpu"
+
+    fresh = parser().parse_args(
+        ["run", str(tmp_path / "capture"), "--output", str(tmp_path / "fresh"), "--no-color"]
+    )
+    assert selected_collector(fresh) == "cpu"
+
+    explicit = parser().parse_args(
+        [
+            "run",
+            str(tmp_path / "capture"),
+            "--output",
+            str(output),
+            "--resume",
+            "--no-color",
+            "--collector",
+            "metal",
+        ]
+    )
+    assert selected_collector(explicit) == "metal"

@@ -52,16 +52,30 @@ def stop(child):
 
 
 RESOURCE_OPTIONS = ("memory_gb", "cpu_threads", "color_workers", "resources", "chunk_points")
+DIAGNOSTIC_OPTIONS = ("collector_diagnostics",)
 CODE_KEYS = ("python_code", "native_code", "source_identities")
 
 
 def resume_identity(job):
     """Inputs and options that determine outputs. Resource limits only change speed and may differ on resume."""
-    options = {k: v for k, v in job["options"].items() if k not in RESOURCE_OPTIONS}
+    options = {
+        k: v
+        for k, v in job["options"].items()
+        if k not in RESOURCE_OPTIONS and k not in DIAGNOSTIC_OPTIONS
+    }
+    options.setdefault("collector", "cpu")
     inputs = {
         k: v
         for k, v in job.get("source_identities", {}).items()
-        if not k.endswith(("s20_reconstruct", "s20_refine_poses", "s20_geometry", "s20_blend"))
+        if not k.endswith(
+            (
+                "s20_reconstruct",
+                "s20_refine_poses",
+                "s20_geometry",
+                "s20_blend",
+                "libs20_collector.dylib",
+            )
+        )
     }
     return {
         **{k: v for k, v in job.items() if k not in CODE_KEYS},
@@ -80,7 +94,15 @@ def code_changes(previous, job):
     changed += sorted(
         Path(f).name
         for f in set(before) | set(after)
-        if f.endswith(("s20_reconstruct", "s20_refine_poses", "s20_geometry", "s20_blend"))
+        if f.endswith(
+            (
+                "s20_reconstruct",
+                "s20_refine_poses",
+                "s20_geometry",
+                "s20_blend",
+                "libs20_collector.dylib",
+            )
+        )
         and before.get(f) != after.get(f)
     )
     return changed
