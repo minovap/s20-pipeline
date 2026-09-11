@@ -10,6 +10,8 @@ from PIL import Image
 import s20_pipeline.collect as module
 from s20_pipeline.camera import CameraFrame, FisheyeCalibration
 
+NATIVE_VISIBILITY = Path(__file__).parents[1] / "build/libs20_visibility.dylib"
+
 
 def camera():
     calibration = FisheyeCalibration(
@@ -278,4 +280,35 @@ def test_collector_serial_parallel_observations_and_unwritten_zeros(tmp_path, mo
             assert values[:, 0, 7].max() > 0
         else:
             assert not values.any()
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.skipif(not NATIVE_VISIBILITY.is_file(), reason="CPU visibility is not built")
+def test_collector_native_visibility_matches_numpy(tmp_path, monkeypatch):
+    points, _, _ = geometry()
+    image = tmp_path / "photo.png"
+    Image.fromarray(np.zeros((48, 64, 3), dtype="uint8")).save(image)
+    frame = replace(camera(), image_path=image)
+    mask_root = tmp_path / "masks"
+    (mask_root / "left_mask").mkdir(parents=True)
+    Image.fromarray(np.zeros((48, 64), dtype="uint8")).save(
+        mask_root / "left_mask" / image.name
+    )
+    monkeypatch.setattr(module, "read_ply_info", lambda _: None)
+    monkeypatch.setattr(module, "map_points", lambda _: points)
+    monkeypatch.setattr(module, "load_camera_frames", lambda *_: [frame])
+    outputs = []
+    for name, library in (("numpy", None), ("native", NATIVE_VISIBILITY)):
+        output = tmp_path / name
+        module.collect(
+            image,
+            image,
+            image,
+            mask_root,
+            output,
+            workers=4,
+            chunk=101,
+            visibility_library=library,
+        )
+        outputs.append((output / "candidates/observations.bin").read_bytes())
     assert outputs[0] == outputs[1]

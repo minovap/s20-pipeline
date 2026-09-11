@@ -103,6 +103,7 @@ def execute(stage, job):
     elif stage == "candidates":
         from .collect import collect
 
+        collector = cfg.get("collector", "cpu")
         mask_root = (
             Path(job["masks"])
             if job.get("masks")
@@ -117,12 +118,15 @@ def execute(stage, job):
             cfg["color_workers"],
             cfg["chunk_points"],
             progress,
-            cfg.get("collector", "cpu"),
-            native / "libs20_collector.dylib" if cfg.get("collector", "cpu") == "metal" else None,
+            collector,
+            native / "libs20_collector.dylib" if collector == "metal" else None,
             Path(job["native_sources"]) / "collector.metal"
-            if cfg.get("collector", "cpu") == "metal"
+            if collector == "metal"
             else None,
             cfg.get("collector_diagnostics", False),
+            visibility_library=(native / "libs20_visibility.dylib")
+            if collector == "cpu" and (native / "libs20_visibility.dylib").is_file()
+            else None,
         )
     elif stage in ("global", "local"):
         from .camera import load_camera_frames

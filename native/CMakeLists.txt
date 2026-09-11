@@ -31,3 +31,6 @@ endforeach()
 add_library(s20_collector SHARED collector.mm)
 target_compile_options(s20_collector PRIVATE -O3 -fobjc-arc)
 target_link_libraries(s20_collector PRIVATE "-framework Foundation" "-framework Metal")
+
+add_library(s20_visibility SHARED visibility.cpp)
+target_compile_options(s20_visibility PRIVATE -O3 -Wall -Wextra -ffp-contract=off)

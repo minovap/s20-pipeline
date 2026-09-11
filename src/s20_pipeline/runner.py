@@ -74,6 +74,7 @@ def resume_identity(job):
                 "s20_geometry",
                 "s20_blend",
                 "libs20_collector.dylib",
+                "libs20_visibility.dylib",
             )
         )
     }
@@ -101,6 +102,7 @@ def code_changes(previous, job):
                 "s20_geometry",
                 "s20_blend",
                 "libs20_collector.dylib",
+                "libs20_visibility.dylib",
             )
         )
         and before.get(f) != after.get(f)

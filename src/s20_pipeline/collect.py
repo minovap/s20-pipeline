@@ -449,6 +449,7 @@ def collect(
     metal_kernels=None,
     diagnostics=False,
     profile=False,
+    visibility_library=None,
 ):
     if backend not in ("cpu", "cpu_float32", "metal"):
         raise ValueError(f"Unknown collector backend: {backend}")
@@ -481,6 +482,13 @@ def collect(
         all_point_ids = np.arange(n, dtype="uint32")
     else:
         all_point_ids = None
+    native_visibility = None
+    if visibility_library is not None:
+        if backend != "cpu":
+            raise ValueError("Native visibility supports only the exact CPU collector")
+        from .cpu_visibility import CpuVisibility
+
+        native_visibility = CpuVisibility(xyz, normals, visibility_library)
     phase_started = perf_counter()
     c = _empty_observations(dest / "observations.bin", n, K)
     scores = c[:, :, 7]
@@ -572,6 +580,8 @@ def collect(
             image_wait_s = perf_counter() - image_wait_started
             if image_size != (cal.width, cal.height) or mask.shape != (cal.height, cal.width):
                 raise ValueError("Image/mask dimensions do not match calibration")
+            if native_visibility is not None:
+                mask = native_visibility.prepare_mask(mask)
 
             def color_chunk(start):
                 chunk_started = perf_counter()
@@ -602,21 +612,36 @@ def collect(
                 if metal_result is None:
                     blocker_keys = filled[pix]
                     exact_keys = depth_id[pix]
-                    visible, reliable, surface_rejected, incidence = visibility_decisions(
-                        xyz,
-                        normals,
-                        ids,
-                        d,
-                        blocker_keys % n,
-                        exact_keys,
-                        n,
-                        f,
-                        "float32" if backend == "cpu_float32" else "mixed",
-                    )
+                    if native_visibility is None:
+                        visible, reliable, surface_rejected, incidence = visibility_decisions(
+                            xyz,
+                            normals,
+                            ids,
+                            d,
+                            blocker_keys % n,
+                            exact_keys,
+                            n,
+                            f,
+                            "float32" if backend == "cpu_float32" else "mixed",
+                        )
+                        native_usable = None
+                    else:
+                        native_result = native_visibility.decide(
+                            ids, u, v, d, blocker_keys, exact_keys, f, mask
+                        )
+                        visible = (native_result.flags & np.uint8(4)) != 0
+                        surface_rejected = (native_result.flags & np.uint8(2)) != 0
+                        native_usable = (native_result.flags & np.uint8(8)) != 0
+                        incidence = native_result.incidence
+                        denominator_shortcuts = native_result.denominator_shortcuts
+                        plane_shortcuts = native_result.plane_shortcuts
                 else:
                     point_flags = metal_result.flags[positions]
                     visible = (point_flags & VISIBLE) != 0
                     surface_rejected = (point_flags & SURFACE_REJECTED) != 0
+                if native_visibility is None or metal_result is not None:
+                    denominator_shortcuts = 0
+                    plane_shortcuts = 0
                 decision_s = perf_counter() - decision_started if profile else 0.0
                 if profile:
                     exact_depth = (
@@ -631,34 +656,46 @@ def collect(
                     passes_exact_depth = 0
                 rejected_chunk = int(surface_rejected.sum())
                 visible_count = int(np.count_nonzero(visible)) if profile else 0
-                ids = ids[visible]
-                u = u[visible]
-                v = v[visible]
-                d = d[visible]
-                angle = angle[visible]
-                x = u.astype("int32")
-                y = v.astype("int32")
-                mask_started = perf_counter()
-                usable = (
-                    (mask[y, x] == 0)
-                    & (mask[y + 1, x] == 0)
-                    & (mask[y, x + 1] == 0)
-                    & (mask[y + 1, x + 1] == 0)
-                )
-                mask_s = perf_counter() - mask_started if profile else 0.0
-                usable_count = int(np.count_nonzero(usable)) if profile else 0
-                ids = ids[usable]
-                u = u[usable]
-                v = v[usable]
-                if metal_result is not None:
-                    ray = (xyz[ids] - f.center.astype("float32")) / d[usable, None]
-                    incidence_for_score = np.einsum("ij,ij->i", normals[ids], -ray)
+                if native_visibility is not None and metal_result is None:
+                    mask_s = 0.0
+                    usable_count = int(np.count_nonzero(native_usable)) if profile else 0
+                    ids = ids[native_usable]
+                    u = u[native_usable]
+                    v = v[native_usable]
+                    incidence_for_score = incidence[native_usable]
+                    score_angle = angle[native_usable]
+                    score_distance = d[native_usable]
                 else:
-                    incidence_for_score = incidence[visible][usable]
+                    ids = ids[visible]
+                    u = u[visible]
+                    v = v[visible]
+                    d = d[visible]
+                    angle = angle[visible]
+                    x = u.astype("int32")
+                    y = v.astype("int32")
+                    mask_started = perf_counter()
+                    usable = (
+                        (mask[y, x] == 0)
+                        & (mask[y + 1, x] == 0)
+                        & (mask[y, x + 1] == 0)
+                        & (mask[y + 1, x + 1] == 0)
+                    )
+                    mask_s = perf_counter() - mask_started if profile else 0.0
+                    usable_count = int(np.count_nonzero(usable)) if profile else 0
+                    ids = ids[usable]
+                    u = u[usable]
+                    v = v[usable]
+                    score_angle = angle[usable]
+                    score_distance = d[usable]
+                    if metal_result is not None:
+                        ray = (xyz[ids] - f.center.astype("float32")) / d[usable, None]
+                        incidence_for_score = np.einsum("ij,ij->i", normals[ids], -ray)
+                    else:
+                        incidence_for_score = incidence[visible][usable]
                 rank_started = perf_counter()
                 score = (
-                    np.exp(-2 * angle[usable] ** 2)
-                    / (d[usable] ** 2 + 0.25)
+                    np.exp(-2 * score_angle**2)
+                    / (score_distance**2 + 0.25)
                     * np.maximum(incidence_for_score, 0.05) ** 2
                 )
                 score_count = len(score) if profile else 0
@@ -689,6 +726,8 @@ def collect(
                     "mask_s": mask_s,
                     "rank_s": rank_s,
                     "pack_s": pack_s,
+                    "denominator_shortcuts": denominator_shortcuts,
+                    "plane_shortcuts": plane_shortcuts,
                 }
 
             valid_projection_pairs = (
@@ -724,6 +763,10 @@ def collect(
                     else 0,
                     "inserted": inserted,
                     "surface_patch_rejections": rejected,
+                    "visibility_denominator_shortcuts": sum(
+                        t["denominator_shortcuts"] for t in totals
+                    ),
+                    "visibility_plane_shortcuts": sum(t["plane_shortcuts"] for t in totals),
                     "projection_cpu_rechecks": metal_result.projection_rechecks
                     if metal_result is not None
                     else 0,
@@ -783,6 +826,17 @@ def collect(
                 stream.write(json.dumps(rows[-1]) + "\n")
             progress(index + 1, len(fs))
     metal_stats = metal.stats() if metal is not None else None
+    visibility_stats = native_visibility.stats() if native_visibility is not None else None
+    if visibility_stats is not None:
+        visibility_stats.update(
+            {
+                "calls": sum(len(range(0, row["projected_points"], CHUNK)) for row in rows),
+                "denominator_shortcuts": sum(
+                    row["visibility_denominator_shortcuts"] for row in rows
+                ),
+                "plane_shortcuts": sum(row["visibility_plane_shortcuts"] for row in rows),
+            }
+        )
     if metal is not None:
         metal.close()
     voxel_order = getattr(point_index, "order", None)
@@ -799,7 +853,7 @@ def collect(
     voxel_order = None
     color_chunk = None
     projection = projected_chunks = selected = selected_ids = depth_id = filled = None
-    mask = metal_result = None
+    mask = metal_result = native_visibility = None
     totals = image_future = None
     xyz = normals = all_point_ids = None
     del point_index, metal
@@ -819,6 +873,7 @@ def collect(
                 "color_workers": workers,
                 "collector": backend,
                 "metal": metal_stats,
+                "native_visibility": visibility_stats,
                 "profile": {
                     **setup_times,
                     **finalize,

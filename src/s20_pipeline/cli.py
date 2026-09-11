@@ -230,6 +230,12 @@ def prepare_job(args):
         needed += ["s20_blend"]
     if args.color and options["collector"] == "metal":
         needed += ["libs20_collector.dylib"]
+    if (
+        args.color
+        and options["collector"] == "cpu"
+        and (args.native_dir / "libs20_visibility.dylib").is_file()
+    ):
+        needed += ["libs20_visibility.dylib"]
     for name in needed:
         path = args.native_dir / name
         if not path.is_file():

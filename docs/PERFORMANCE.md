@@ -152,3 +152,19 @@ The representation costs 20 bytes per valid pair instead of 16 bytes per selecte
 | Valid-only projection | 15.869 s, 15.972 s, 15.790 s | 15.869 s | 2.549 GB |
 
 This is another **5.12% wall-time reduction** (`1.054×`). The 24.6 MB (`0.98%`) sampled-RSS increase is within the variability of the final file-backed materialization peak; during the photo loop, sampled RSS peaked between 2.075 and 2.129 GB. All three output files matched the frozen golden observations byte for byte. From the original 24.390-second CPU baseline, the combined exact changes are **34.9% faster** (`1.537×`).
+
+
+## Native exact visibility and mask fusion, 12 September 2026
+
+The exact CPU collector uses a separate stateless C++ library, when available, to fuse mixed-precision visibility decisions and the four-pixel mask test. The native call borrows the existing geometry and compact projection arrays; it creates no geometry copy and performs no nested threading. Float32 ray, denominator and incidence arithmetic, double plane/hit/patch arithmetic, float32 relative depth tolerance and chronological NumPy ranking remain unchanged. Floating-point contraction is disabled. The NumPy implementation remains the fallback when the library is absent, and the selected library is included in run provenance and resume change detection.
+
+Reliability short-circuits are exact: a denominator at or below the float32 `0.15` threshold cannot produce a reliable patch, and a plane depth at or below `0.1` cannot pass reliability. The frozen scan skipped 7,499,664 of 155,575,674 plane calculations at the denominator gate; its conditioned plane-depth gate skipped none. The main gain comes from fused scalar work and eliminating NumPy geometry-gather/ray/hit/patch/mask temporaries rather than from this 4.8% shortcut alone.
+
+| Collector | Candidate-stage wall samples | Median wall |
+|---|---|---:|
+| Valid-only NumPy visibility | 15.869 s, 15.972 s, 15.790 s | 15.869 s |
+| Native visibility and mask | 12.981 s, 12.834 s, 13.018 s | 12.981 s |
+
+The native fusion is **18.2% faster** than the preceding checkpoint (`1.222×`). Profiling reduced visibility/color wall time from 5.249 s to 2.170 s and summed decision worker time from 18.884 s to 3.158 s. A final run after ABI hardening measured 12.863 s and remained byte-identical. Photo-loop sampled RSS was 1.95–2.04 GB; whole-stage sampled peaks varied with final file-backed materialization and are not used to claim an RSS improvement. Releasing the native wrapper before finalization is important because it owns references to both 12-byte-per-point geometry arrays.
+
+Validation includes exact float32 incidence bits, threshold neighbors around positive and negative `0.15`, translated centers, unusual non-byte masks, concurrent calls, native-versus-NumPy collector integration and four byte-for-byte full frozen-scan comparisons. The combined median improvement from the original 24.390-second CPU baseline is **46.8%** (`1.879×`).

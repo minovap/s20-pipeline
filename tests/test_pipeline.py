@@ -306,10 +306,16 @@ def test_resume_identity_ignores_code_and_resource_changes():
             "/x/all.bag": {"bytes": 1, "mtime_ns": 2},
             "/b/s20_reconstruct": "h2",
             "/b/libs20_collector.dylib": "h3",
+            "/b/libs20_visibility.dylib": "h4",
         },
     }
     assert resume_identity(before) == resume_identity(after)
-    assert code_changes(before, after) == ["a.py", "libs20_collector.dylib", "s20_reconstruct"]
+    assert code_changes(before, after) == [
+        "a.py",
+        "libs20_collector.dylib",
+        "libs20_visibility.dylib",
+        "s20_reconstruct",
+    ]
     changed_input = {
         **after,
         "source_identities": {
