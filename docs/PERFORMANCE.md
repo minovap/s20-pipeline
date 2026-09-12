@@ -204,3 +204,15 @@ The existing three-photo workers and 32,768-slot read bound remain, but each nat
 | Native final materialization | 9.847 s, 10.062 s, 10.036 s | 10.036 s |
 
 This is another **10.51% wall-time reduction** (`1.117×`). The profiled final-pack phase, including concurrent image decoding, fell from 3.157 s to 1.939 s. All three full observation files matched the frozen golden file byte for byte. The combined median improvement from the original 24.390-second CPU baseline is **58.9%** (`2.430×`).
+
+
+## Native stable four-record sort and count, 12 September 2026
+
+Final ranking now uses a fixed stable insertion sort for each point's four records and counts occupied photo IDs in the same native scan. A record moves left only for a strictly greater score; equal scores and signed zeros retain their order, and NaNs sort last as in stable `argsort(-scores)`. All eight float32 fields are copied bit-for-bit. The NumPy chunked sort and bincount remain the no-library fallback.
+
+| Collector | Candidate-stage wall samples | Median wall |
+|---|---|---:|
+| Native final materialization | 9.847 s, 10.062 s, 10.036 s | 10.036 s |
+| Native stable sort/count | 9.198 s, 9.177 s, 9.073 s | 9.177 s |
+
+This is another **8.56% wall-time reduction** (`1.094×`). The profiled final-sort/count phase fell from 0.879 s to 0.120 s. All three full observation files matched the frozen golden file byte for byte. The combined median improvement from the original 24.390-second CPU baseline is **62.4%** (`2.658×`).

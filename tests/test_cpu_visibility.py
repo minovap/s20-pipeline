@@ -260,3 +260,33 @@ def test_native_pack_matches_numpy_at_pixel_edges(slot_dtype):
     np.testing.assert_array_equal(records.view("uint32"), expected.view("uint32"))
     with pytest.raises(ValueError, match="grid dimensions"):
         native.pack_slots(records, flat_slots, image, (-1, 6))
+
+
+@native_required
+def test_native_sort_count_matches_stable_numpy_special_scores():
+    rng = np.random.default_rng(837)
+    records = rng.normal(size=(6, 4, 8)).astype("float32")
+    records[:, :, 6] = np.arange(4, dtype="float32")
+    records[:, :, 7] = np.array(
+        [
+            [0.5, 0.5, 0.2, 0.9],
+            [np.nan, 0.4, np.nan, 0.4],
+            [np.inf, 2.0, -np.inf, 0.0],
+            [0.0, -0.0, 0.0, -0.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [-1.0, -2.0, -3.0, -4.0],
+        ],
+        dtype="float32",
+    )
+    order = np.argsort(-records[:, :, 7], axis=1, kind="stable")
+    expected = np.take_along_axis(records, order[:, :, None], axis=1)
+    occupied = expected[:, :, 7] > 0
+    expected_counts = np.bincount(
+        expected[:, :, 6][occupied].astype(np.intp), minlength=4
+    )
+    xyz = np.zeros((len(records), 3), dtype="float32")
+    native = CpuVisibility(xyz, xyz, LIBRARY)
+    native.release_geometry()
+    counts = native.sort_count(records, 4)
+    np.testing.assert_array_equal(records.view("uint32"), expected.view("uint32"))
+    np.testing.assert_array_equal(counts, expected_counts)

@@ -92,21 +92,27 @@ def _finalize_observations(dest, observations, frames, chunk, grid, workers, nat
     photo_ids = observations[:, :, 6]
     uv = observations[:, :, :2]
     sort_started = perf_counter()
-    per_photo = np.zeros(len(frames), dtype=np.int64)
-    final_occupied = 0
-    for start in range(0, n, chunk):
-        end = min(n, start + chunk)
-        part = observations[start:end]
-        order = np.argsort(-part[:, :, 7], axis=1, kind="stable")
-        observations[start:end] = np.take_along_axis(part, order[:, :, None], axis=1)
-        occupied = scores[start:end] > 0
-        final_occupied += int(np.count_nonzero(occupied))
-        per_photo += np.bincount(
-            photo_ids[start:end][occupied].astype(np.intp), minlength=len(frames)
-        )
+    if native is not None:
+        per_photo = native.sort_count(observations, len(frames))
+        final_occupied = int(per_photo.sum())
+    else:
+        per_photo = np.zeros(len(frames), dtype=np.int64)
+        final_occupied = 0
+        for start in range(0, n, chunk):
+            end = min(n, start + chunk)
+            part = observations[start:end]
+            order = np.argsort(-part[:, :, 7], axis=1, kind="stable")
+            observations[start:end] = np.take_along_axis(part, order[:, :, None], axis=1)
+            occupied = scores[start:end] > 0
+            final_occupied += int(np.count_nonzero(occupied))
+            per_photo += np.bincount(
+                photo_ids[start:end][occupied].astype(np.intp), minlength=len(frames)
+            )
     sort_s = perf_counter() - sort_started
 
-    offsets = np.r_[np.int64(0), np.cumsum(per_photo)]
+    offsets = np.empty(len(per_photo) + 1, dtype=per_photo.dtype)
+    offsets[0] = 0
+    np.cumsum(per_photo, out=offsets[1:])
     if final_occupied == 0:
         flush_started = perf_counter()
         observations.flush()
@@ -119,6 +125,7 @@ def _finalize_observations(dest, observations, frames, chunk, grid, workers, nat
             "final_occupied": 0,
             "represented_photos": 0,
             "slot_index_bytes": 0,
+            "slot_offset_dtype": offsets.dtype.str,
         }
     slot_dtype = np.uint32 if n * candidates <= np.iinfo(np.uint32).max else np.uint64
     slot_path = dest / "ranking-slots.bin"
@@ -223,6 +230,7 @@ def _finalize_observations(dest, observations, frames, chunk, grid, workers, nat
         "final_occupied": final_occupied,
         "represented_photos": int(np.count_nonzero(per_photo)),
         "slot_index_bytes": final_occupied * np.dtype(slot_dtype).itemsize,
+        "slot_offset_dtype": offsets.dtype.str,
     }
 
 

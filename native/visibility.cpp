@@ -20,7 +20,53 @@ inline float dot3(const float *a, float x, float y, float z) {
 
 }  // namespace
 
-extern "C" uint32_t s20_visibility_abi_version() { return 4u; }
+extern "C" uint32_t s20_visibility_abi_version() { return 5u; }
+
+extern "C" int s20_sort_count(
+    float *observations,
+    uint64_t point_count,
+    uint32_t photo_count,
+    uint64_t *per_photo
+) {
+    if (!observations || !per_photo || photo_count == 0u) return 1;
+    for (uint64_t point = 0; point < point_count; ++point) {
+        float *records = observations + size_t(point) * 4u * 8u;
+        uint32_t order[4] = {0u, 1u, 2u, 3u};
+        for (uint32_t index = 1; index < 4u; ++index) {
+            const uint32_t current = order[index];
+            const float current_score = records[size_t(current) * 8u + 7u];
+            uint32_t destination = index;
+            while (destination > 0u) {
+                const float previous_score = records[size_t(order[destination - 1u]) * 8u + 7u];
+                const bool move_left = !std::isnan(current_score) &&
+                    (std::isnan(previous_score) || current_score > previous_score);
+                if (!move_left) break;
+                order[destination] = order[destination - 1u];
+                --destination;
+            }
+            order[destination] = current;
+        }
+        if (order[0] != 0u || order[1] != 1u || order[2] != 2u || order[3] != 3u) {
+            float copy[4u * 8u];
+            std::copy_n(records, 4u * 8u, copy);
+            for (uint32_t destination = 0; destination < 4u; ++destination) {
+                std::copy_n(copy + size_t(order[destination]) * 8u, 8u,
+                            records + size_t(destination) * 8u);
+            }
+        }
+        for (uint32_t candidate = 0; candidate < 4u; ++candidate) {
+            const float *record = records + size_t(candidate) * 8u;
+            if (!(record[7] > 0.0f)) continue;
+            const float photo_value = record[6];
+            if (!std::isfinite(photo_value) || photo_value < 0.0f ||
+                double(photo_value) >= double(photo_count)) {
+                return 2;
+            }
+            ++per_photo[static_cast<uint32_t>(photo_value)];
+        }
+    }
+    return 0;
+}
 
 extern "C" int s20_pack_slots(
     float *observations,

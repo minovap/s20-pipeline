@@ -154,6 +154,7 @@ def test_deferred_finalizer_matches_legacy_packing_and_stable_sort(tmp_path, wor
     np.testing.assert_array_equal(actual, expected)
     assert stats["final_occupied"] == 7
     assert stats["represented_photos"] == 3
+    assert stats["slot_offset_dtype"] == ("<u8" if native else "<i8")
     assert not (tmp_path / "ranking-slots.bin").exists()
 
 

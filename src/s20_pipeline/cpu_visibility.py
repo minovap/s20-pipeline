@@ -38,7 +38,7 @@ class CpuVisibility:
         self.library = ctypes.CDLL(str(library))
         self.library.s20_visibility_abi_version.argtypes = []
         self.library.s20_visibility_abi_version.restype = ctypes.c_uint32
-        if self.library.s20_visibility_abi_version() != 4:
+        if self.library.s20_visibility_abi_version() != 5:
             raise RuntimeError("Unsupported native visibility ABI")
         self._configure()
     def _configure(self):
@@ -106,6 +106,13 @@ class CpuVisibility:
             ctypes.c_uint32,
         ]
         self.library.s20_pack_slots.restype = ctypes.c_int
+        self.library.s20_sort_count.argtypes = [
+            float_pointer,
+            ctypes.c_uint64,
+            ctypes.c_uint32,
+            ulong_pointer,
+        ]
+        self.library.s20_sort_count.restype = ctypes.c_int
 
     def decide(self, ids, u, v, distance, blocker_keys, exact_keys, frame, mask):
         ids = np.asarray(ids)
@@ -255,6 +262,29 @@ class CpuVisibility:
             raise RuntimeError(f"Native bucket scatter failed with error {result}")
         if not np.array_equal(cursors, offsets[1:]):
             raise RuntimeError("Native candidate photo buckets are incomplete")
+
+    def sort_count(self, observations, photo_count):
+        observations = np.asarray(observations)
+        if (
+            observations.dtype != np.float32
+            or observations.ndim != 3
+            or observations.shape[1:] != (4, 8)
+            or not observations.flags.c_contiguous
+            or not observations.flags.writeable
+        ):
+            raise ValueError("Native sorting expects writable contiguous n x 4 x 8 records")
+        if not 0 < photo_count <= np.iinfo(np.uint32).max:
+            raise ValueError("Native sorting photo count must fit uint32")
+        per_photo = np.zeros(photo_count, dtype=np.uint64)
+        result = self.library.s20_sort_count(
+            observations.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(observations),
+            photo_count,
+            per_photo.ctypes.data_as(ctypes.POINTER(ctypes.c_uint64)),
+        )
+        if result:
+            raise RuntimeError(f"Native final sorting failed with error {result}")
+        return per_photo
 
     def release_geometry(self):
         self.xyz = None
