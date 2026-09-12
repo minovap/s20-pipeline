@@ -475,11 +475,36 @@ fn delete_run(run: String, state: State<Engine>) -> Result<(), String> {
         return Err("Wait for the active job to finish first".into());
     }
     let root = projects_root(&state)?;
-    let folder = PathBuf::from(&run).canonicalize().map_err(|e| e.to_string())?;
-    let is_run = folder.starts_with(&root)
-        && folder.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("runs")
-        && folder.join("job.json").is_file();
-    if !is_run {
+    delete_run_path(&root, &run)
+}
+fn delete_run_path(root: &Path, run: &str) -> Result<(), String> {
+    let requested = Path::new(run);
+    if !requested.is_absolute() || requested.file_name().is_none() {
+        return Err("Not a run folder".into());
+    }
+    // Resolve the parent first: an early copy failure can leave a visible run
+    // in the UI without ever creating its output directory.
+    let runs = requested.parent().ok_or("Not a run folder")?
+        .canonicalize().map_err(|_| "Not a run folder".to_string())?;
+    let project = runs.parent().ok_or("Not a run folder")?;
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    if runs.file_name().and_then(|n| n.to_str()) != Some("runs")
+        || !project.starts_with(&root) || project == root
+        || !project.join("project.json").is_file() {
+        return Err("Not a run folder".into());
+    }
+    let folder = runs.join(requested.file_name().ok_or("Not a run folder")?);
+    let metadata = match fs::symlink_metadata(&folder) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // The copy record may have been written before the run existed.
+            let sidecar = folder.with_extension("copy.json");
+            if sidecar.is_file() { fs::remove_file(sidecar).map_err(|e| e.to_string())?; }
+            return Ok(());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || !folder.join("job.json").is_file() {
         return Err("Not a run folder".into());
     }
     if let Some(temp) = read_json(&folder.join("copy.json")).and_then(|c| c["temp"].as_str().map(|t| t.to_string())) {
@@ -490,7 +515,11 @@ fn delete_run(run: String, state: State<Engine>) -> Result<(), String> {
         }).unwrap_or(false);
         if !shared { remove_temp_copy(Path::new(&temp)); }
     }
-    fs::remove_dir_all(folder).map_err(|e| e.to_string())
+    match fs::remove_dir_all(&folder) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !folder.exists() => Ok(()),
+        Err(e) => Err(format!("Could not delete {}: {e}", folder.display())),
+    }
 }
 #[tauri::command]
 fn delete_export(path: String, state: State<Engine>) -> Result<(), String> {
@@ -1161,5 +1190,25 @@ mod tests {
         assert_eq!(run["stages"][1]["status"], "incomplete");
         assert!(run["result"].is_null());
         let _ = fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn deletion_handles_runs_that_never_created_a_folder() {
+        let root = std::env::temp_dir().join(format!("s20-delete-run-{}", now()));
+        let project = root.join("project");
+        let runs = project.join("runs");
+        fs::create_dir_all(&runs).unwrap();
+        fs::write(project.join("project.json"), b"{}").unwrap();
+        let missing = runs.join("2026-09-12 10-25-00");
+        let sidecar = missing.with_extension("copy.json");
+        fs::write(&sidecar, b"{}").unwrap();
+        delete_run_path(&root, missing.to_str().unwrap()).unwrap();
+        assert!(!sidecar.exists());
+        let real = runs.join("2026-09-12 10-26-00");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("job.json"), b"{}").unwrap();
+        delete_run_path(&root, real.to_str().unwrap()).unwrap();
+        assert!(!real.exists());
+        assert!(delete_run_path(&root, project.to_str().unwrap()).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 }

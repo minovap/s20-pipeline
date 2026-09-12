@@ -142,6 +142,7 @@ function App() {
         <ProjectScreen key={screen.path} path={screen.path} settings={settings} live={live} reloadKey={reloadKey}
           onBack={openProjects} onSettings={() => setShowSettings(true)} onError={setError}
           onStart={startRun} onResume={resumeRun} onCancel={cancelRun}
+          onForgetRun={path => setLive(current => current?.job.output === path ? null : current)}
           onOpenViewer={(focus?: string) => setScreen({kind: 'viewer', path: screen.path, focus})} />
       )}
       {screen.kind === 'viewer' && (

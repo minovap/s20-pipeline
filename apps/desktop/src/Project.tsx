@@ -18,6 +18,7 @@ export function ProjectScreen(props: {
   onStart: (project: Project, input: Input, options: Options) => Promise<void>;
   onResume: (project: Project, run: Run, overrides?: Partial<Options>) => Promise<void>;
   onCancel: () => void;
+  onForgetRun: (path: string) => void;
   onOpenViewer: (focus?: string) => void;
 }) {
   const {path, settings, live, reloadKey, onError} = props;
@@ -111,7 +112,7 @@ export function ProjectScreen(props: {
   }
   function deleteRun(run: Run) {
     setDialog(<ConfirmDialog title="Delete run" body={<>Delete the run from {when(run.started)} and everything it produced? This cannot be undone.</>} confirm="Delete" danger
-      onCancel={() => setDialog(null)} onConfirm={async () => { setDialog(null); try { await api.deleteRun(run.path); setSelected(null); await load(); } catch (e) { onError(errorText(e)); } }} />);
+      onCancel={() => setDialog(null)} onConfirm={async () => { setDialog(null); try { await api.deleteRun(run.path); props.onForgetRun(run.path); setSelected(null); await load(); } catch (e) { onError(errorText(e)); } }} />);
   }
 
   if (!project) return <div className="center"><Spinner /></div>;
