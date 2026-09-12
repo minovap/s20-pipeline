@@ -85,6 +85,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     setChecked(new Set(params.get('check') === 'all' ? sources.map(x => x.path) : [slice ? slice.id : first]));
     setSelected(slice ? slice.id : first);
     if (params.get('calibrate')) setTimeout(() => startCalibration(first), 800);
+    if (params.get('outline')) setTimeout(() => openOutlineRef.current(), 2500);
   }, [project, sources, focus]);
 
   // ---- renderer lifecycle
@@ -382,6 +383,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       return s;
     });
   }
+  const openOutlineRef = useRef<() => void>(() => {});
   function openOutlineDialog() {
     if (!sliceTarget) { onError('Check a point cloud first.'); return; }
     const parentBox = sliceTarget.parent ? effectiveBox(sliceTarget.parent, slices) : worldBoxOf(sliceTarget.source);
@@ -402,6 +404,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         if (mode === 'persp') setMode('top');
       }} />);
   }
+  openOutlineRef.current = openOutlineDialog;
   function updateShape(slice: Slice, shape: Shape) {
     void saveSlices(withShapeBoxes(slices.map(s => (s.id === slice.id ? {...s, shape} : s))));
   }
