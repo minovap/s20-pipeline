@@ -25,7 +25,7 @@ const FRAG = `
 varying vec3 vColor;
 void main(){ vec2 d = gl_PointCoord - vec2(0.5); if (dot(d, d) > 0.25) discard; gl_FragColor = vec4(vColor, 1.0); }`;
 
-type Entry = {cloud: Cloud; points: THREE.Points; visible: THREE.BufferAttribute; material: THREE.ShaderMaterial; localBounds: THREE.Box3; bounds: THREE.Box3; visibleBounds: THREE.Box3; shown: boolean; mask: Float32Array | null};
+type Entry = {cloud: Cloud; points: THREE.Points; visible: THREE.BufferAttribute; material: THREE.ShaderMaterial; localBounds: THREE.Box3; bounds: THREE.Box3; visibleBounds: THREE.Box3; shown: boolean; mask: Float32Array | null; localVisible: THREE.Box3 | null};
 
 export class CloudRenderer {
   private renderer: THREE.WebGLRenderer;
@@ -144,7 +144,7 @@ export class CloudRenderer {
       points.position.copy(new THREE.Vector3(...(cloud.info.origin as [number, number, number])).sub(this.worldOrigin));
       const localBounds = new THREE.Box3(new THREE.Vector3(...(cloud.info.bounds[0] as [number, number, number])), new THREE.Vector3(...(cloud.info.bounds[1] as [number, number, number])));
       this.scene.add(points);
-      const entry: Entry = {cloud, points, visible, material, localBounds, bounds: new THREE.Box3(), visibleBounds: new THREE.Box3(), shown: true, mask: null};
+      const entry: Entry = {cloud, points, visible, material, localBounds, bounds: new THREE.Box3(), visibleBounds: new THREE.Box3(), shown: true, mask: null, localVisible: null};
       this.entries.set(path, entry);
       this.setOrientation(path, IDENTITY);
     }
@@ -172,13 +172,18 @@ export class CloudRenderer {
     this.draw();
   }
 
-  /** null shows every point; an all-zero mask hides the cloud entirely. */
-  setMask(path: string, mask: Float32Array | null) {
+  /**
+   * null shows every point; an all-zero mask hides the cloud entirely.
+   * `localBounds` is the box of the visible points in the cloud's own
+   * coordinates, computed off-thread with the mask; without it the whole
+   * cloud's box is used.
+   */
+  setMask(path: string, mask: Float32Array | null, localBounds?: [number, number, number, number, number, number] | null) {
     const e = this.entries.get(path);
     if (!e) return;
     e.mask = mask;
-    if (!mask) (e.visible.array as Float32Array).fill(1);
-    else (e.visible.array as Float32Array).set(mask);
+    if (!mask) { (e.visible.array as Float32Array).fill(1); e.localVisible = null; }
+    else { (e.visible.array as Float32Array).set(mask); e.localVisible = localBounds === undefined ? e.localBounds.clone() : localBounds ? new THREE.Box3(new THREE.Vector3(localBounds[0], localBounds[1], localBounds[2]), new THREE.Vector3(localBounds[3], localBounds[4], localBounds[5])) : new THREE.Box3(); }
     this.updateVisibleBounds(e);
     e.points.visible = e.shown;
     e.visible.needsUpdate = true;
@@ -186,10 +191,9 @@ export class CloudRenderer {
   }
   private updateVisibleBounds(e: Entry) {
     if (!e.mask) { e.shown = true; e.visibleBounds.copy(e.bounds); return; }
-    const d = e.cloud.positions, box = new THREE.Box3(), v = new THREE.Vector3(), m = e.points.matrixWorld;
-    for (let i = 0; i < e.mask.length; i++) if (e.mask[i]) box.expandByPoint(v.set(d[i * 3], d[i * 3 + 1], d[i * 3 + 2]).applyMatrix4(m));
-    e.shown = !box.isEmpty();
-    e.visibleBounds.copy(box.isEmpty() ? e.bounds : box);
+    const local = e.localVisible;
+    e.shown = !!local && !local.isEmpty();
+    e.visibleBounds.copy(e.shown ? local!.clone().applyMatrix4(e.points.matrixWorld) : e.bounds);
     e.points.visible = e.shown;
   }
 

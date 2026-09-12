@@ -9,7 +9,8 @@ import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, useContextMenu} fr
 import type {Box, Cloud, ExportEvent, Orientation, Project, Shape, Slice} from '../types';
 import {PREVIEW_MAX, defaultBudget} from '../types';
 import {CloudRenderer, DEPTH_AXIS, type ViewMode} from './render';
-import {children, countMask, descendants, effectiveBox, effectiveRegion, intersect, newId, nextSliceName, normalize, unionMask} from './slices';
+import {MaskService} from './masks';
+import {children, descendants, effectiveBox, effectiveRegion, intersect, newId, nextSliceName, normalize} from './slices';
 import {LYCKAN_8, LYCKAN_8_BUILDINGS, area as polygonArea, centred, centredWith, formatVertices, offsetPolygon, parseVertices, rectangle, shapeBox, shapeOf, worldPoints, worldPolygon} from './shape';
 import type {XY} from './shape';
 
@@ -60,6 +61,8 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
 
   const host = useRef<HTMLDivElement>(null), canvas = useRef<HTMLCanvasElement>(null);
   const renderer = useRef<CloudRenderer | null>(null);
+  const masks = useRef(new MaskService());
+  useEffect(() => { const m = masks.current; return () => m.dispose(); }, []);
 
   // ---- project and sources
   const reload = useCallback(async () => {
@@ -76,6 +79,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     return list;
   }, [project]);
   const storedSlices = project?.slices ?? [];
+  /** Slices as drawn: an outline being dragged follows the pointer here. Masks and counts use the stored slices only. */
   const slices = useMemo(() => (dragShape ? withShapeBoxes(storedSlices.map(s => (s.id === dragShape.id && s.shape ? {...s, shape: {...s.shape, position: dragShape.position}} : s))) : storedSlices), [storedSlices, dragShape]);
   const orientations = useMemo<Record<string, Orientation>>(() => {
     const stored = project?.orientations ?? {};
@@ -122,6 +126,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       const total = totals[source] ?? (await api.cloudInfo(source)).source_points;
       setTotals(t => (t[source] === total ? t : {...t, [source]: total}));
       const cloud = await api.loadCloud(source, budgetFor(total));
+      masks.current.load(source, cloud.positions);
       setClouds(c => new Map(c).set(source, cloud));
     } catch (e) { onError(errorText(e)); setChecked(c => { const n = new Set(c); n.delete(source); return n; }); }
     finally { setLoading(l => { const n = new Set(l); n.delete(source); return n; }); }
@@ -140,6 +145,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   useEffect(() => {
     if (firstPercent.current) { firstPercent.current = false; return; }
     if (percent == null) localStorage.removeItem('previewPercent'); else localStorage.setItem('previewPercent', String(percent));
+    for (const source of clouds.keys()) masks.current.unload(source);
     setClouds(new Map());
   }, [percent]);
 
@@ -153,20 +159,26 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   useEffect(() => { renderer.current?.setSliceMode(slicing && mode !== 'persp'); }, [slicing, mode]);
   useEffect(() => { if (!slicing) setDraft(null); }, [slicing]);
 
-  // ---- visibility masks: a checked cloud shows everything; otherwise the union of its checked slices
+  // ---- visibility masks: a checked cloud shows everything; otherwise the union of its checked slices.
+  // Polygon tests on millions of points run in a worker; only the newest request per cloud is applied.
+  const maskToken = useRef(new Map<string, number>());
   useEffect(() => {
     const r = renderer.current;
     if (!r) return;
     for (const [source, cloud] of clouds) {
+      const token = (maskToken.current.get(source) ?? 0) + 1;
+      maskToken.current.set(source, token);
       if (checked.has(source)) { r.setMask(source, null); continue; }
-      const regions = slices.filter(s => s.source === source && checked.has(s.id)).map(s => effectiveRegion(s, slices)).filter((b): b is NonNullable<typeof b> => !!b);
-      if (!regions.length) { r.setMask(source, new Float32Array(cloud.positions.length / 3)); continue; }
-      r.setMask(source, unionMask(cloud.positions, cloud.info.origin, regions, transformFor(orientations[source], cloud.info.origin)));
+      const regions = storedSlices.filter(s => s.source === source && checked.has(s.id)).map(s => effectiveRegion(s, storedSlices)).filter((b): b is NonNullable<typeof b> => !!b);
+      if (!regions.length) { r.setMask(source, new Float32Array(cloud.positions.length / 3), null); continue; }
+      masks.current.mask(source, cloud.info.origin, regions, transformFor(orientations[source], cloud.info.origin))
+        .then(result => { if (maskToken.current.get(source) === token) { renderer.current?.setMask(source, result.mask, result.bounds); setZRange(renderer.current?.worldZRange() ?? null); } })
+        .catch(e => onError(errorText(e)));
     }
     // Frame the first thing that becomes visible, after its mask is in place.
     if (firstFrame.current && clouds.size) { firstFrame.current = false; r.frameVisible(); }
     setZRange(r.worldZRange());
-  }, [checked, slices, clouds, orientations]);
+  }, [checked, storedSlices, clouds, orientations]);
   useEffect(() => { renderer.current?.setHeightWindow(heightWindow.lo, heightWindow.hi); }, [heightWindow, clouds]);
 
   const selectedSlice = slices.find(s => s.id === selected) ?? null;
@@ -202,15 +214,20 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     }
   }, [selectedSlice, selectedShape, slices, placing]);
 
-  const sliceCounts = useMemo(() => {
-    const out = new Map<string, number>();
-    for (const s of slices) {
+  // Shown-point counts per slice, computed in the worker; a slice keeps its old count until the new one arrives.
+  const [sliceCounts, setSliceCounts] = useState<Map<string, number>>(new Map());
+  const countToken = useRef(0);
+  useEffect(() => {
+    const token = ++countToken.current;
+    for (const s of storedSlices) {
       const cloud = clouds.get(s.source);
-      const region = effectiveRegion(s, slices);
-      if (cloud && region) out.set(s.id, countMask(unionMask(cloud.positions, cloud.info.origin, [region], transformFor(orientations[s.source], cloud.info.origin))));
+      const region = effectiveRegion(s, storedSlices);
+      if (!cloud || !region) continue;
+      masks.current.count(s.source, cloud.info.origin, region, transformFor(orientations[s.source], cloud.info.origin))
+        .then(n => { if (countToken.current === token) setSliceCounts(c => (c.get(s.id) === n ? c : new Map(c).set(s.id, n))); })
+        .catch(() => {});
     }
-    return out;
-  }, [slices, clouds, orientations]);
+  }, [storedSlices, clouds, orientations]);
 
   // ---- persistence
   async function saveSlices(next: Slice[]) {
@@ -555,7 +572,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       if (e.key === '7') setMode('top'); else if (e.key === '1') setMode('front'); else if (e.key === '3') setMode('side'); else if (e.key === '5') setMode('persp');
       else if (e.key === 'f') renderer.current?.frameVisible(true);
       else if (e.key === 's') (slicing ? setSlicing(false) : startSlicing());
-      else if (e.key === 'Escape') { if (placing) setPlacing(null); else if (draft) setDraft(null); else if (slicing) setSlicing(false); else if (calibrating) endCalibration(false); }
+      else if (e.key === 'Escape') { if (placing) setPlacing(null); else if (draft) setDraft(null); else if (slicing) setSlicing(false); else if (calibrating) endCalibration(false); else setSelected(null); }
       else if (e.key === 'Enter' && placing) crop();
       else if (e.key === 'Enter' && draft && slicing) commitDraft();
       else if ((e.key === 'Backspace' || e.key === 'Delete') && selectedSlice) deleteSlice(selectedSlice);
@@ -724,6 +741,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
           else await api.writeProject(project.path, {clouds: project.clouds.filter(c => c.path !== s.path)});
           await api.writeProject(project.path, {slices: slices.filter(x => x.source !== s.path)});
           setChecked(c => { const n = new Set(c); n.delete(s.path); return n; });
+          masks.current.unload(s.path);
           setClouds(c => { const n = new Map(c); n.delete(s.path); return n; });
           await reload();
         } catch (e) { onError(errorText(e)); }
