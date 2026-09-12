@@ -250,6 +250,12 @@ pre.log { margin: 0 16px 8px 48px; padding: 10px 12px; background: var(--bg); bo
 .slicebar span { color: var(--amber); font-size: 12px; }
 .slicebar.calibrate span { color: var(--text); }
 .slicebar.outline-hint span { color: var(--muted); }
+.outline-preview { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start; margin-top: 4px; }
+.outline-preview .field { margin: 0; }
+.shape-preview { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); }
+.shape-preview polygon { fill: rgba(216, 194, 122, 0.18); stroke: var(--amber); stroke-width: 1.5; stroke-linejoin: round; }
+.shape-preview circle { fill: var(--text); }
+.shape-preview text { fill: var(--muted); font-size: 10px; }
 .modal textarea { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--text); resize: vertical; }
 .pad.small { font-size: 12px; line-height: 1.5; padding-top: 4px; }
 .orientation { border-top: 0; }

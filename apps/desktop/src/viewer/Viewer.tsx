@@ -714,7 +714,12 @@ function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; 
             <label className="field inline"><span>Width to height</span><input type="number" min={0.2} step={0.1} value={aspect} onChange={e => setAspect(e.target.value)} /></label>
           </div>
         )}
-        {preset === 'custom' && <label className="field"><span>Corners</span><textarea rows={6} value={text} onChange={e => setText(e.target.value)} spellCheck={false} /></label>}
+        <div className="outline-preview">
+          <ShapePreview vertices={vertices ?? []} />
+          <label className="field"><span>Corners, x y in metres</span>
+            <textarea rows={7} value={preset === 'custom' ? text : formatVertices(vertices ?? [])} readOnly={preset !== 'custom'} onChange={e => setText(e.target.value)} spellCheck={false} />
+          </label>
+        </div>
         <p className="note">{vertices ? `${vertices.length} corners, ${Math.round(size).toLocaleString()} m². It is placed at the centre of the view; drag it into place and turn it with the corner buttons.` : 'Enter at least three corners.'}</p>
         <label className="field"><span>Name</span><input value={name} onChange={e => setName(e.target.value)} /></label>
         <label className="choice"><input type="checkbox" checked={withBand} onChange={e => setWithBand(e.target.checked)} />
@@ -723,6 +728,24 @@ function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; 
         <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!ok}>Create</button></footer>
       </form>
     </Modal>
+  );
+}
+
+/** Small drawing of an outline, north up, with the corners marked. */
+function ShapePreview({vertices}: {vertices: XY[]}) {
+  const size = 170;
+  if (vertices.length < 3) return <svg className="shape-preview" width={size} height={size} />;
+  const xs = vertices.map(v => v[0]), ys = vertices.map(v => v[1]);
+  const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys);
+  const k = (size - 24) / Math.max(w, h, 1e-6);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const pts = vertices.map(([x, y]) => [size / 2 + (x - cx) * k, size / 2 - (y - cy) * k] as XY);
+  return (
+    <svg className="shape-preview" width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-label="Outline preview">
+      <polygon points={pts.map(p => p.join(',')).join(' ')} />
+      {pts.map((p, i) => <circle key={i} cx={p[0]} cy={p[1]} r={2.5} />)}
+      <text x={size - 4} y={12} textAnchor="end">N ↑</text>
+    </svg>
   );
 }
 
