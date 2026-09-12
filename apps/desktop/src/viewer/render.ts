@@ -3,6 +3,9 @@
 // side-by-side compare pane. Draws on demand only.
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {LineSegments2} from 'three/addons/lines/LineSegments2.js';
+import {LineSegmentsGeometry} from 'three/addons/lines/LineSegmentsGeometry.js';
+import {LineMaterial} from 'three/addons/lines/LineMaterial.js';
 import type {Box, Cloud, Orientation} from '../types';
 import {IDENTITY, quaternion} from './orient';
 
@@ -32,7 +35,9 @@ export class CloudRenderer {
   private controls: OrbitControls;
   private entries = new Map<string, Entry>();
   private outline: THREE.LineSegments | null = null;
-  private polygons: THREE.LineSegments[] = [];
+  private polygons: LineSegments2[] = [];
+  private lineMaterials: LineMaterial[] = [];
+  private fills: THREE.Mesh[] = [];
   private grid: THREE.GridHelper | null = null;
   private observer: ResizeObserver;
   worldOrigin: THREE.Vector3 | null = null;
@@ -257,12 +262,49 @@ export class CloudRenderer {
     this.scene.add(this.grid);
   }
 
-  /** Outline polygons (world XY, a z range) drawn as a top and bottom loop with corner posts; guides are one dashed loop. */
-  setPolygons(polys: {points: [number, number][]; z: [number, number]; strong: boolean; dashed?: boolean}[]) {
-    for (const line of this.polygons) { this.scene.remove(line); line.geometry.dispose(); (line.material as THREE.Material).dispose(); }
+  /**
+   * Outline polygons (world XY, a z range) drawn as a top and bottom loop with
+   * corner posts; guides are one dashed loop at the lower height. Fat lines
+   * with a dark backing so they read on any background, drawn over the points.
+   */
+  setPolygons(polys: {points: [number, number][]; z: [number, number]; strong: boolean; dashed?: boolean; fill?: {color: number; opacity: number; hole?: [number, number][]}}[]) {
+    for (const line of this.polygons) { this.scene.remove(line); line.geometry.dispose(); }
+    for (const m of this.lineMaterials) m.dispose();
+    for (const mesh of this.fills) { this.scene.remove(mesh); mesh.geometry.dispose(); (mesh.material as THREE.Material).dispose(); }
     this.polygons = [];
+    this.lineMaterials = [];
+    this.fills = [];
     const o = this.worldOrigin;
     if (!o) { this.draw(); return; }
+    // Translucent washes at ground level, under the lines.
+    for (const poly of polys) {
+      if (!poly.fill) continue;
+      const shape = new THREE.Shape(poly.points.map(([x, y]) => new THREE.Vector2(x - o.x, y - o.y)));
+      if (poly.fill.hole) shape.holes.push(new THREE.Path(poly.fill.hole.map(([x, y]) => new THREE.Vector2(x - o.x, y - o.y))));
+      const geometry = new THREE.ShapeGeometry(shape);
+      const material = new THREE.MeshBasicMaterial({color: poly.fill.color, transparent: true, opacity: poly.fill.opacity, depthTest: false, depthWrite: false, side: THREE.DoubleSide});
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.z = poly.z[0] - o.z;
+      mesh.renderOrder = 5;
+      this.scene.add(mesh);
+      this.fills.push(mesh);
+    }
+    const {w, h} = this.size();
+    const add = (pts: number[], options: {color: number; width: number; opacity: number; dashed?: boolean; dashSize?: number; gapSize?: number; dashOffset?: number; order: number}) => {
+      const geometry = new LineSegmentsGeometry();
+      geometry.setPositions(pts);
+      const material = new LineMaterial({
+        color: options.color, linewidth: options.width, transparent: true, opacity: options.opacity, depthTest: false, depthWrite: false,
+        dashed: !!options.dashed, dashSize: options.dashSize ?? 1, gapSize: options.gapSize ?? 1, dashOffset: options.dashOffset ?? 0, worldUnits: false,
+      });
+      material.resolution.set(w, h);
+      const line = new LineSegments2(geometry, material);
+      line.computeLineDistances();
+      line.renderOrder = options.order;
+      this.scene.add(line);
+      this.polygons.push(line);
+      this.lineMaterials.push(material);
+    };
     for (const poly of polys) {
       const pts: number[] = [];
       const n = poly.points.length;
@@ -272,15 +314,20 @@ export class CloudRenderer {
         for (const z of levels) pts.push(ax - o.x, ay - o.y, z - o.z, bx - o.x, by - o.y, z - o.z);
         if (!poly.dashed) pts.push(ax - o.x, ay - o.y, poly.z[0] - o.z, ax - o.x, ay - o.y, poly.z[1] - o.z);
       }
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
-      const material = poly.dashed
-        ? new THREE.LineDashedMaterial({color: 0xe8e4dc, transparent: true, opacity: 0.5, dashSize: 0.6, gapSize: 0.4})
-        : new THREE.LineBasicMaterial({color: poly.strong ? 0xd8c27a : 0x9fc59b, transparent: true, opacity: poly.strong ? 0.95 : 0.6});
-      const line = new THREE.LineSegments(geometry, material);
-      if (poly.dashed) line.computeLineDistances();
-      this.scene.add(line);
-      this.polygons.push(line);
+      if (poly.dashed) {
+        // Buildings and other guides: bright dashed over a dark backing.
+        add(pts, {color: 0x10151a, width: 6, opacity: 0.8, order: 10});
+        add(pts, {color: 0x7fd8ff, width: 3.5, opacity: 0.95, dashed: true, dashSize: 0.8, gapSize: 0.5, order: 11});
+      } else if (poly.strong) {
+        // The outline: dark backing, then amber and white dashes alternating.
+        add(pts, {color: 0x10151a, width: 7, opacity: 0.85, order: 12});
+        add(pts, {color: 0xffd35a, width: 4, opacity: 1, dashed: true, dashSize: 1, gapSize: 1, order: 13});
+        add(pts, {color: 0xffffff, width: 4, opacity: 1, dashed: true, dashSize: 1, gapSize: 1, dashOffset: 1, order: 13});
+      } else {
+        // Perimeter band edge.
+        add(pts, {color: 0x10151a, width: 5, opacity: 0.8, order: 10});
+        add(pts, {color: 0x9fe6a0, width: 2.5, opacity: 0.95, order: 11});
+      }
     }
     this.draw();
   }
@@ -362,6 +409,7 @@ export class CloudRenderer {
     const {w, h} = this.size();
     this.renderer.setSize(w, h, false);
     this.setAspect(w, h);
+    for (const m of this.lineMaterials) m.resolution.set(w, h);
     this.draw();
   }
 

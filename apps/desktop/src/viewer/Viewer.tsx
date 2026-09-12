@@ -180,9 +180,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (!r) return;
     if (placing) {
       const base = worldPolygon({vertices: placing.vertices, position: placing.position, rotation: placing.rotation});
-      const polys: {points: XY[]; z: [number, number]; strong: boolean; dashed?: boolean}[] = [{points: base, z: placing.z, strong: true}];
-      if (placing.band != null) polys.push({points: offsetPolygon(base, placing.band), z: placing.z, strong: false});
-      for (const g of placing.guides) polys.push({points: worldPoints(placing, g), z: placing.z, strong: false, dashed: true});
+      const polys: Parameters<CloudRenderer['setPolygons']>[0] = [{points: base, z: placing.z, strong: true, fill: {color: 0xffd35a, opacity: 0.1}}];
+      if (placing.band != null) polys.push({points: offsetPolygon(base, placing.band), z: placing.z, strong: false, fill: {color: 0x9fe6a0, opacity: 0.12, hole: base}});
+      for (const g of placing.guides) polys.push({points: worldPoints(placing, g), z: placing.z, strong: false, dashed: true, fill: {color: 0x7fd8ff, opacity: 0.16}});
       r.setOutline(null);
       r.setPolygons(polys);
       return;
@@ -191,9 +191,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (selectedSlice && selectedShape && box) {
       const z: [number, number] = [box[0][2], box[1][2]];
       const base = worldPolygon(selectedShape);
-      const polys: {points: XY[]; z: [number, number]; strong: boolean; dashed?: boolean}[] = [{points: base, z, strong: !selectedSlice.ring}];
-      if (selectedSlice.ring) polys.push({points: offsetPolygon(base, selectedSlice.ring.expand), z, strong: true});
-      for (const g of selectedShape.guides ?? []) polys.push({points: worldPoints(selectedShape, g), z, strong: false, dashed: true});
+      const polys: Parameters<CloudRenderer['setPolygons']>[0] = [{points: base, z, strong: !selectedSlice.ring, fill: selectedSlice.ring ? undefined : {color: 0xffd35a, opacity: 0.1}}];
+      if (selectedSlice.ring) polys.push({points: offsetPolygon(base, selectedSlice.ring.expand), z, strong: true, fill: {color: 0x9fe6a0, opacity: 0.12, hole: base}});
+      for (const g of selectedShape.guides ?? []) polys.push({points: worldPoints(selectedShape, g), z, strong: false, dashed: true, fill: {color: 0x7fd8ff, opacity: 0.16}});
       r.setOutline(null);
       r.setPolygons(polys);
     } else {
