@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 from scipy import sparse
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import LinearOperator, cg, spsolve
 
 
 def normal_matrix(edges, w, nodes):
@@ -14,6 +14,23 @@ def normal_matrix(edges, w, nodes):
     cols = np.concatenate([i, j, j, i])
     data = np.concatenate([w, w, -w, -w])
     return sparse.coo_matrix((data, (rows, cols)), shape=(nodes, nodes)).tocsr()
+
+
+def solve_spd(matrix, rhs, start):
+    """Solve a symmetric positive definite sparse system.
+
+    Conjugate gradients with a Jacobi preconditioner, warm-started; a direct
+    factorisation fills in badly once tens of thousands of cells from many
+    photos are coupled, while each CG step is one cheap product.
+    """
+    diagonal = matrix.diagonal()
+    inverse = np.where(diagonal > 0, 1.0 / np.maximum(diagonal, 1e-12), 1.0)
+    preconditioner = LinearOperator(matrix.shape, matvec=lambda v: inverse * v, dtype=np.float64)
+    solution, info = cg(matrix, rhs, x0=start, M=preconditioner, rtol=1e-9, maxiter=5000)
+    if info != 0:
+        # Fall back to the exact solve rather than return a partial answer.
+        solution = spsolve(matrix, rhs)
+    return solution
 
 
 def solve_channel(args):
@@ -29,7 +46,7 @@ def solve_channel(args):
         rhs = (np.bincount(i, wy, nodes) - np.bincount(j, wy, nodes)).astype(np.float64)
         if local:
             rhs += 8 * prior
-        correction = spsolve(normal_matrix(edges, w, nodes) + reg, rhs)
+        correction = solve_spd(normal_matrix(edges, w, nodes) + reg, rhs, correction)
         residual = correction[i] - correction[j] - y
         w = base * np.minimum(1, 8 / np.maximum(abs(residual), 1e-05))
     return correction, (float(np.median(abs(residual))) if len(residual) else None)
@@ -74,6 +91,25 @@ class Exposure:
             shape=(n, self.k, 8),
         )
 
+    def sample(self, step=16, chunk_points=1 << 20):
+        """Every step-th candidate record, read sequentially in chunks.
+
+        A strided memmap read touches every page of the file and keeps it
+        resident; streaming keeps memory near the sample size.
+        """
+        n = json.loads((self.output / "candidates/meta.json").read_text())["points"]
+        record = self.k * 8
+        parts = []
+        with (self.output / "candidates/observations.bin").open("rb") as stream:
+            for start in range(0, n, chunk_points):
+                count = min(chunk_points, n - start)
+                block = np.fromfile(stream, dtype="float32", count=count * record).reshape(
+                    count, self.k, 8
+                )
+                first = (-start) % step
+                parts.append(block[first::step].copy())
+        return np.concatenate(parts) if parts else np.zeros((0, self.k, 8), dtype="float32")
+
     def interpolate(self, c, field):
         x = c[..., 4]
         y = c[..., 5]
@@ -94,8 +130,7 @@ class Exposure:
     def solve(self, mode):
         dest = self.output / mode
         dest.mkdir(parents=True, exist_ok=False)
-        allc = self.candidates()
-        sample = np.asarray(allc[::16])
+        sample = self.sample()
         a = sample[:, 0]
         indices = np.arange(len(sample))
         train = indices % 5 != 0
