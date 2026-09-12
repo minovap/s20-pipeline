@@ -26,11 +26,15 @@ export class MaskService {
     }
     return this.worker;
   }
+  private loaded = new Map<string, Float32Array>();
+  /** Give the worker a cloud's positions unless it already holds that exact array. */
   load(source: string, positions: Float32Array) {
+    if (this.loaded.get(source) === positions) return;
+    this.loaded.set(source, positions);
     // The worker gets its own copy; the renderer keeps the original for the GPU.
     this.w.postMessage({type: 'load', source, positions: positions.slice()});
   }
-  unload(source: string) { this.w.postMessage({type: 'unload', source}); }
+  unload(source: string) { this.loaded.delete(source); this.w.postMessage({type: 'unload', source}); }
   private request<T>(message: Record<string, unknown>): Promise<T> {
     const id = this.next++;
     return new Promise<T>((resolve, reject) => {
@@ -38,11 +42,14 @@ export class MaskService {
       this.w.postMessage({...message, id});
     });
   }
-  mask(source: string, origin: number[], regions: (Box | Region)[], transform: Transform | null): Promise<MaskResult> {
-    return this.request<MaskResult>({type: 'mask', source, origin, regions, transform});
+  mask(source: string, origin: number[], regions: {key: string; region: Box | Region}[], transform: Transform | null): Promise<MaskResult> {
+    return this.request<MaskResult>({type: 'mask', source, origin, regions, transform, transformKey: JSON.stringify(transform)});
   }
-  count(source: string, origin: number[], region: Box | Region, transform: Transform | null): Promise<number> {
-    return this.request<{count: number}>({type: 'count', source, origin, region, transform}).then(r => r.count);
+  count(source: string, origin: number[], region: {key: string; region: Box | Region}, transform: Transform | null): Promise<number> {
+    return this.request<{count: number}>({type: 'count', source, origin, region, transform, transformKey: JSON.stringify(transform)}).then(r => r.count);
   }
   dispose() { this.worker?.terminate(); this.worker = null; this.pending.clear(); }
 }
+
+/** One worker for the app's lifetime, so reopening the viewer needs no reload of point data. */
+export const maskService = new MaskService();

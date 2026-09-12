@@ -153,3 +153,17 @@ test('outline shapes: garden area, placement, perimeter band and masks', async (
   assert.deepEqual([...unionMask(data, [0, 0, 0], [ring])], [0, 1, 0]);
   assert.deepEqual([...unionMask(data, [0, 0, 0], [inside, ring])], [1, 1, 0]);
 });
+
+
+test('perimeter band is not clipped by its parent outline and has a rounded edge', async () => {
+  const {effectiveBox} = await import('../src/viewer/slices.ts');
+  const {bandOutline, area} = await import('../src/viewer/shape.ts');
+  const all = [
+    {id: 'g', name: 'G', source: 's', parent: null, box: [[0, 0, 0], [10, 10, 5]], created: 0, shape: {vertices: [[-5, -5], [5, -5], [5, 5], [-5, 5]], position: [5, 5], rotation: 0}},
+    {id: 'p', name: 'P', source: 's', parent: 'g', box: [[-2, -2, 0], [12, 12, 5]], created: 0, ring: {expand: 2}},
+  ];
+  assert.deepEqual(effectiveBox(all[1], all), [[-2, -2, 0], [12, 12, 5]]);
+  const ring = bandOutline([[0, 0], [10, 0], [10, 10], [0, 10]], 2);
+  // area of a 2 m rounded band around a 10 m square: 100 + 4*10*2 + pi*4 = 192.6
+  assert(Math.abs(area(ring) - 192.6) < 1.5, `band area ${area(ring)}`);
+});

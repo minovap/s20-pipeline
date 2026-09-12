@@ -41,15 +41,16 @@ export function effectiveRegion(slice: Slice, all: Slice[]): Region | null {
   return {box, tests};
 }
 
-/** The region a slice really covers: its own box clipped by every ancestor. */
+/** The region a slice really covers: its own box clipped by every ancestor. A perimeter band lies outside its parent outline, so that parent's box does not clip it. */
 export function effectiveBox(slice: Slice, all: Slice[]): Box | null {
   let box: Box | null = slice.box;
   let parent = slice.parent;
+  let skip = slice.ring ? slice.parent : null;
   let guard = 0;
   while (box && parent && guard++ < 64) {
     const p = all.find(s => s.id === parent);
     if (!p) break;
-    box = intersect(box, p.box);
+    if (p.id !== skip) box = intersect(box, p.box);
     parent = p.parent;
   }
   return box;

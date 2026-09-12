@@ -95,6 +95,38 @@ function normal(a: XY, b: XY, sign: number): XY {
   return sign > 0 ? [dy / len, -dx / len] : [-dy / len, dx / len];
 }
 
+/**
+ * Boundary of the region within `distance` of the polygon, outside it: offset
+ * edges joined by arcs at convex corners and by the offset lines' intersection
+ * at concave ones. Matches the distance test used for perimeter bands.
+ */
+export function bandOutline(vertices: XY[], distance: number): XY[] {
+  const n = vertices.length;
+  if (n < 3 || distance <= 0) return vertices.map(v => [...v] as XY);
+  const sign = signedArea(vertices) > 0 ? 1 : -1;
+  const out: XY[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = vertices[(i + n - 1) % n], p = vertices[i], next = vertices[(i + 1) % n];
+    const n0 = normal(prev, p, sign), n1 = normal(p, next, sign);
+    const cross = (p[0] - prev[0]) * (next[1] - p[1]) - (p[1] - prev[1]) * (next[0] - p[0]);
+    const convex = cross * sign > 0;
+    if (convex) {
+      let a0 = Math.atan2(n0[1], n0[0]), a1 = Math.atan2(n1[1], n1[0]);
+      let sweep = a1 - a0;
+      // Outward normals turn with the traversal: counter-clockwise polygons sweep positively at convex corners.
+      if (sign > 0) { while (sweep < 0) sweep += 2 * Math.PI; while (sweep > 2 * Math.PI) sweep -= 2 * Math.PI; }
+      else { while (sweep > 0) sweep -= 2 * Math.PI; while (sweep < -2 * Math.PI) sweep += 2 * Math.PI; }
+      const steps = Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 12)));
+      for (let k = 0; k <= steps; k++) { const a = a0 + (sweep * k) / steps; out.push([p[0] + distance * Math.cos(a), p[1] + distance * Math.sin(a)]); }
+    } else {
+      const bx = n0[0] + n1[0], by = n0[1] + n1[1], len = Math.hypot(bx, by) || 1;
+      const cosHalf = Math.max(0.2, (bx * n0[0] + by * n0[1]) / len);
+      out.push([p[0] + (bx / len) * (distance / cosHalf), p[1] + (by / len) * (distance / cosHalf)]);
+    }
+  }
+  return out;
+}
+
 export function insidePolygon(x: number, y: number, v: XY[]): boolean {
   let inside = false;
   for (let i = 0, j = v.length - 1; i < v.length; j = i++) {
@@ -125,7 +157,7 @@ export function passes(x: number, y: number, test: PolygonTest): boolean {
 
 /** World-space bounding box of a shape slice over a z range, used for the box chain and export clipping. */
 export function shapeBox(shape: Shape, mode: 'inside' | 'ring', expand: number, z: [number, number]): Box {
-  const poly = mode === 'ring' ? offsetPolygon(worldPolygon(shape), expand * 1.5) : worldPolygon(shape);
+  const poly = mode === 'ring' ? bandOutline(worldPolygon(shape), expand + 0.05) : worldPolygon(shape);
   const xs = poly.map(p => p[0]), ys = poly.map(p => p[1]);
   return [[Math.min(...xs), Math.min(...ys), z[0]], [Math.max(...xs), Math.max(...ys), z[1]]];
 }

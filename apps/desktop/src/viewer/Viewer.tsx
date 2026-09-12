@@ -9,12 +9,17 @@ import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, useContextMenu} fr
 import type {Box, Cloud, ExportEvent, Orientation, Project, Shape, Slice} from '../types';
 import {PREVIEW_MAX, defaultBudget} from '../types';
 import {CloudRenderer, DEPTH_AXIS, type ViewMode} from './render';
-import {MaskService} from './masks';
+import {maskService} from './masks';
+import type {Region} from './slices';
 import {children, descendants, effectiveBox, effectiveRegion, intersect, newId, nextSliceName, normalize} from './slices';
-import {LYCKAN_8, LYCKAN_8_BUILDINGS, area as polygonArea, centred, centredWith, formatVertices, offsetPolygon, parseVertices, rectangle, shapeBox, shapeOf, worldPoints, worldPolygon} from './shape';
+import {LYCKAN_8, LYCKAN_8_BUILDINGS, area as polygonArea, bandOutline, centred, centredWith, formatVertices, parseVertices, rectangle, shapeBox, shapeOf, worldPoints, worldPolygon} from './shape';
 import type {XY} from './shape';
 
 type Source = {path: string; name: string; detail: string; kind: 'result' | 'export' | 'import'};
+/** Loaded previews survive leaving the viewer, so reopening it shows the cloud at once. One entry per file, replaced when the share changes. */
+const cloudCache = new Map<string, {budget: number; cloud: Cloud}>();
+/** Cache key of a slice's region for the mask worker. */
+const regionKey = (slice: Slice, region: Region) => `${slice.id}:${JSON.stringify(region)}`;
 type V3 = [number, number, number];
 /** A slice being drawn: two opposite corners in world coordinates on the view plane. */
 type Draft = {p1: V3; p2: V3};
@@ -61,8 +66,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
 
   const host = useRef<HTMLDivElement>(null), canvas = useRef<HTMLCanvasElement>(null);
   const renderer = useRef<CloudRenderer | null>(null);
-  const masks = useRef(new MaskService());
-  useEffect(() => { const m = masks.current; return () => m.dispose(); }, []);
+  const masks = useRef(maskService);
 
   // ---- project and sources
   const reload = useCallback(async () => {
@@ -125,7 +129,10 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     try {
       const total = totals[source] ?? (await api.cloudInfo(source)).source_points;
       setTotals(t => (t[source] === total ? t : {...t, [source]: total}));
-      const cloud = await api.loadCloud(source, budgetFor(total));
+      const budget = budgetFor(total);
+      const cached = cloudCache.get(source);
+      const cloud = cached && cached.budget === budget ? cached.cloud : await api.loadCloud(source, budget);
+      cloudCache.set(source, {budget, cloud});
       masks.current.load(source, cloud.positions);
       setClouds(c => new Map(c).set(source, cloud));
     } catch (e) { onError(errorText(e)); setChecked(c => { const n = new Set(c); n.delete(source); return n; }); }
@@ -169,7 +176,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       const token = (maskToken.current.get(source) ?? 0) + 1;
       maskToken.current.set(source, token);
       if (checked.has(source)) { r.setMask(source, null); continue; }
-      const regions = storedSlices.filter(s => s.source === source && checked.has(s.id)).map(s => effectiveRegion(s, storedSlices)).filter((b): b is NonNullable<typeof b> => !!b);
+      const regions = storedSlices.filter(s => s.source === source && checked.has(s.id)).map(s => { const region = effectiveRegion(s, storedSlices); return region ? {key: regionKey(s, region), region} : null; }).filter((b): b is NonNullable<typeof b> => !!b);
       if (!regions.length) { r.setMask(source, new Float32Array(cloud.positions.length / 3), null); continue; }
       masks.current.mask(source, cloud.info.origin, regions, transformFor(orientations[source], cloud.info.origin))
         .then(result => { if (maskToken.current.get(source) === token) { renderer.current?.setMask(source, result.mask, result.bounds); setZRange(renderer.current?.worldZRange() ?? null); } })
@@ -193,7 +200,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (placing) {
       const base = worldPolygon({vertices: placing.vertices, position: placing.position, rotation: placing.rotation});
       const polys: Parameters<CloudRenderer['setPolygons']>[0] = [{points: base, z: placing.z, strong: true, fill: {color: 0xffd35a, opacity: 0.1}}];
-      if (placing.band != null) polys.push({points: offsetPolygon(base, placing.band), z: placing.z, strong: false, fill: {color: 0x9fe6a0, opacity: 0.12, hole: base}});
+      if (placing.band != null) polys.push({points: bandOutline(base, placing.band), z: placing.z, strong: false, fill: {color: 0x9fe6a0, opacity: 0.12, hole: base}});
       for (const g of placing.guides) polys.push({points: worldPoints(placing, g), z: placing.z, strong: false, dashed: true, fill: {color: 0x7fd8ff, opacity: 0.16}});
       r.setOutline(null);
       r.setPolygons(polys);
@@ -204,7 +211,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       const z: [number, number] = [box[0][2], box[1][2]];
       const base = worldPolygon(selectedShape);
       const polys: Parameters<CloudRenderer['setPolygons']>[0] = [{points: base, z, strong: !selectedSlice.ring, fill: selectedSlice.ring ? undefined : {color: 0xffd35a, opacity: 0.1}}];
-      if (selectedSlice.ring) polys.push({points: offsetPolygon(base, selectedSlice.ring.expand), z, strong: true, fill: {color: 0x9fe6a0, opacity: 0.12, hole: base}});
+      if (selectedSlice.ring) polys.push({points: bandOutline(base, selectedSlice.ring.expand), z, strong: true, fill: {color: 0x9fe6a0, opacity: 0.12, hole: base}});
       for (const g of selectedShape.guides ?? []) polys.push({points: worldPoints(selectedShape, g), z, strong: false, dashed: true, fill: {color: 0x7fd8ff, opacity: 0.16}});
       r.setOutline(null);
       r.setPolygons(polys);
@@ -223,7 +230,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       const cloud = clouds.get(s.source);
       const region = effectiveRegion(s, storedSlices);
       if (!cloud || !region) continue;
-      masks.current.count(s.source, cloud.info.origin, region, transformFor(orientations[s.source], cloud.info.origin))
+      masks.current.count(s.source, cloud.info.origin, {key: regionKey(s, region), region}, transformFor(orientations[s.source], cloud.info.origin))
         .then(n => { if (countToken.current === token) setSliceCounts(c => (c.get(s.id) === n ? c : new Map(c).set(s.id, n))); })
         .catch(() => {});
     }
@@ -467,7 +474,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     void saveSlices([...slices, ...created]);
     const parentId = placing.parent ? placing.parent.id : placing.source;
     setChecked(c => { const n = new Set(c); n.delete(parentId); for (const x of created) n.add(x.id); return n; });
-    setSelected(outline.id);
+    setSelected(null);
     setPlacing(null);
   }
   openOutlineRef.current = openOutlineDialog;
