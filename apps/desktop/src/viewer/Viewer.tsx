@@ -515,23 +515,42 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   // ---- export
   const exportNames = new Set((project?.exports ?? []).map(x => x.name.toLowerCase()));
   type ExportRegion = {box: Box; polygons: {vertices: XY[]; mode: 'inside' | 'ring'; expand: number}[]};
-  function groupsFor(ids: string[]): {path: string; regions: ExportRegion[]}[] | null {
+  function groupsFor(ids: string[], clipHeight = false): {path: string; regions: ExportRegion[]}[] | null {
     const groups = new Map<string, ExportRegion[]>();
     for (const id of ids) {
       const slice = slices.find(s => s.id === id);
       const source = slice ? slice.source : id;
       const region = slice ? effectiveRegion(slice, slices) : (() => { const b = worldBoxOf(id); return b ? {box: b, tests: []} : null; })();
       if (!region) { onError(`${slice?.name ?? basename(id)} is not loaded yet.`); return null; }
-      const box: Box = [[region.box[0][0], region.box[0][1], Math.max(region.box[0][2], heightWindow.lo ?? -Infinity)], [region.box[1][0], region.box[1][1], Math.min(region.box[1][2], heightWindow.hi ?? Infinity)]];
+      const box: Box = clipHeight
+        ? [[region.box[0][0], region.box[0][1], Math.max(region.box[0][2], heightWindow.lo ?? -Infinity)], [region.box[1][0], region.box[1][1], Math.min(region.box[1][2], heightWindow.hi ?? Infinity)]]
+        : region.box;
       groups.set(source, [...(groups.get(source) ?? []), {box, polygons: region.tests.map(t => ({vertices: t.vertices, mode: t.mode, expand: t.expand}))}]);
     }
     return [...groups].map(([p, regions]) => ({path: p, regions, transform: transformFor(orientations[p], clouds.get(p)?.info.origin ?? [0, 0, 0])}));
   }
   const labelFor = (id: string) => slices.find(s => s.id === id)?.name ?? sources.find(s => s.path === id)?.name ?? basename(id);
+  /** With a height window active, ask whether the export should keep it before choosing names. */
   function startExport(ids: string[]) {
     if (!project || !ids.length) return;
+    if (heightWindow.lo == null && heightWindow.hi == null) { startExportWith(ids, false); return; }
+    const lo = heightWindow.lo, hi = heightWindow.hi;
+    const span = lo != null && hi != null ? `between ${lo.toFixed(2)} and ${hi.toFixed(2)} m` : lo != null ? `above ${lo.toFixed(2)} m` : `below ${hi!.toFixed(2)} m`;
+    setDialog(
+      <Modal title="Export height" onClose={() => setDialog(null)} width={440}>
+        <p className="note">The view hides points outside the height window. Export only the points {span}, or the full height?</p>
+        <footer>
+          <button onClick={() => setDialog(null)}>Cancel</button>
+          <button onClick={() => { setDialog(null); startExportWith(ids, false); }}>Full height</button>
+          <button className="primary" onClick={() => { setDialog(null); startExportWith(ids, true); }}>Only {span}</button>
+        </footer>
+      </Modal>
+    );
+  }
+  function startExportWith(ids: string[], clipHeight: boolean) {
+    if (!project || !ids.length) return;
     if (ids.length === 1) {
-      const groups = groupsFor(ids); if (!groups) return;
+      const groups = groupsFor(ids, clipHeight); if (!groups) return;
       setDialog(<NameDialog title="Export" label="File name" defaultValue={labelFor(ids[0])} confirm="Export" note={<>Saved as a LAS file in the project's exports folder.</>} onCancel={() => setDialog(null)}
         onSubmit={name => { setDialog(null); enqueue([{name, sources: groups}]); }} />);
       return;
@@ -539,9 +558,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     setDialog(<ExportDialog names={ids.map(labelFor)} defaultName={`${project.name} composite`} existing={exportNames} onCancel={() => setDialog(null)}
       onSubmit={(kind, name) => {
         setDialog(null);
-        if (kind === 'composite') { const groups = groupsFor(ids); if (groups) enqueue([{name, sources: groups}]); }
+        if (kind === 'composite') { const groups = groupsFor(ids, clipHeight); if (groups) enqueue([{name, sources: groups}]); }
         else {
-          const jobs = ids.map((id): ExportJob | null => { const groups = groupsFor([id]); return groups ? {name: labelFor(id), sources: groups} : null; }).filter((j): j is ExportJob => !!j);
+          const jobs = ids.map((id): ExportJob | null => { const groups = groupsFor([id], clipHeight); return groups ? {name: labelFor(id), sources: groups} : null; }).filter((j): j is ExportJob => !!j);
           enqueue(jobs);
         }
       }} />);
