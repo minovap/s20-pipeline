@@ -37,6 +37,10 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const [panel, setPanel] = useState(true);
   const [scale, setScale] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  /** An outline being placed before it becomes a slice: dragged and turned over the whole cloud, then cropped. */
+  type Placing = {name: string; vertices: XY[]; band: number | null; source: string; parent: Slice | null; z: [number, number]; position: [number, number]; rotation: number};
+  const [placing, setPlacing] = useState<Placing | null>(null);
+  const placeDrag = useRef<{startPosition: [number, number]; origin: V3} | null>(null);
   /** An outline being dragged: its slice and the position it has right now. */
   const [dragShape, setDragShape] = useState<{id: string; position: [number, number]} | null>(null);
   const shapeDrag = useRef<{id: string; startPosition: [number, number]; origin: V3} | null>(null);
@@ -86,6 +90,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     setSelected(slice ? slice.id : first);
     if (params.get('calibrate')) setTimeout(() => startCalibration(first), 800);
     if (params.get('outline')) setTimeout(() => openOutlineRef.current(), 2500);
+    if (params.get('place')) setTimeout(() => setPlacing({name: 'Lyckan 8', vertices: centred(LYCKAN_8), band: 2, source: first, parent: null, z: [-1, 5], position: [0, 0], rotation: 20}), 2500);
   }, [project, sources, focus]);
 
   // ---- renderer lifecycle
@@ -162,11 +167,19 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const selectedShape = selectedSlice ? shapeOf(selectedSlice, slices) : null;
   /** The outline slice a drag or rotation acts on: the selected outline, or the parent of a selected band. */
   const movableOutline = selectedSlice ? (selectedSlice.shape ? selectedSlice : selectedSlice.ring ? slices.find(s => s.id === selectedSlice.parent) ?? null : null) : null;
-  const canMoveOutline = !!movableOutline?.shape && mode === 'top' && !slicing && !calibrating;
+  const canMoveOutline = !!movableOutline?.shape && mode === 'top' && !slicing && !calibrating && !placing;
 
   useEffect(() => {
     const r = renderer.current;
     if (!r) return;
+    if (placing) {
+      const base = worldPolygon({vertices: placing.vertices, position: placing.position, rotation: placing.rotation});
+      const polys = [{points: base, z: placing.z, strong: true}];
+      if (placing.band != null) polys.push({points: offsetPolygon(base, placing.band), z: placing.z, strong: false});
+      r.setOutline(null);
+      r.setPolygons(polys);
+      return;
+    }
     const box = selectedSlice ? effectiveBox(selectedSlice, slices) : null;
     if (selectedSlice && selectedShape && box) {
       const z: [number, number] = [box[0][2], box[1][2]];
@@ -179,7 +192,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       r.setPolygons([]);
       r.setOutline(box);
     }
-  }, [selectedSlice, selectedShape, slices]);
+  }, [selectedSlice, selectedShape, slices, placing]);
 
   const sliceCounts = useMemo(() => {
     const out = new Map<string, number>();
@@ -220,7 +233,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   }
 
   function startSlicing() {
-    if (calibrating) return;
+    if (calibrating || placing) return;
     if (!sliceTarget) { onError('Check a point cloud first, then slice it.'); return; }
     if (mode === 'persp') setMode('top');
     setSlicing(true);
@@ -240,6 +253,13 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   }
   function onPointerDown(e: React.PointerEvent) {
     const target = e.target as HTMLElement;
+    if (placing && mode === 'top' && e.button === 0 && target.tagName === 'CANVAS') {
+      const ptr = pointerWorld(e);
+      if (!ptr) return;
+      placeDrag.current = {startPosition: placing.position, origin: ptr};
+      try { host.current?.setPointerCapture(e.pointerId); } catch { /* optional */ }
+      return;
+    }
     if (canMoveOutline && e.button === 0 && target.tagName === 'CANVAS' && movableOutline?.shape) {
       const ptr = pointerWorld(e);
       if (!ptr) return;
@@ -257,6 +277,12 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     try { host.current?.setPointerCapture(e.pointerId); } catch { /* capture is a convenience only */ }
   }
   function onPointerMove(e: React.PointerEvent) {
+    const placingDrag = placeDrag.current;
+    if (placingDrag) {
+      const ptr = pointerWorld(e);
+      if (ptr) setPlacing(pl => (pl ? {...pl, position: [placingDrag.startPosition[0] + ptr[0] - placingDrag.origin[0], placingDrag.startPosition[1] + ptr[1] - placingDrag.origin[1]]} : pl));
+      return;
+    }
     const moving = shapeDrag.current;
     if (moving) {
       const ptr = pointerWorld(e);
@@ -280,6 +306,11 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     setDraft({p1, p2});
   }
   function onPointerUp(e: React.PointerEvent) {
+    if (placeDrag.current) {
+      placeDrag.current = null;
+      try { if (host.current?.hasPointerCapture(e.pointerId)) host.current.releasePointerCapture(e.pointerId); } catch { /* released */ }
+      return;
+    }
     if (shapeDrag.current) {
       const moving = shapeDrag.current;
       shapeDrag.current = null;
@@ -328,6 +359,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   }
   /** Turn the target cloud about the axis the camera looks along; clockwise on screen is positive. */
   function rotateView(degrees: number) {
+    if (placing) { setPlacing({...placing, rotation: Math.round((placing.rotation - degrees) * 100) / 100}); return; }
     if (movableOutline?.shape && !slicing && !calibrating) {
       // Clockwise on screen in the top view is a negative turn of the outline.
       updateShape(movableOutline, {...movableOutline.shape, rotation: Math.round((movableOutline.shape.rotation - degrees) * 100) / 100});
@@ -368,6 +400,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       onSubmit={name => { setDialog(null); enqueue([{name, sources: [{path: source, boxes: [box], transform: transformFor(current, cloud.info.origin)}]}]); endCalibration(false); }} />);
   }
   const rotationLabel = (() => {
+    if (placing) return {name: placing.name, value: placing.rotation};
     if (movableOutline?.shape && !slicing && !calibrating) return {name: movableOutline.name, value: movableOutline.shape.rotation};
     const o = sliceTarget ? orientations[sliceTarget.source] ?? IDENTITY : IDENTITY;
     if (mode === 'top') return {name: 'Yaw', value: o.rotation[2]};
@@ -394,15 +427,23 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         setDialog(null);
         const centre: [number, number] = [(parentBox[0][0] + parentBox[1][0]) / 2, (parentBox[0][1] + parentBox[1][1]) / 2];
         const z: [number, number] = [parentBox[0][2], parentBox[1][2]];
-        const shape: Shape = {vertices: centred(vertices), position: centre, rotation: 0};
-        const outline: Slice = {id: newId(), name, source: target.source, parent: target.parent?.id ?? null, box: shapeBox(shape, 'inside', 0, z), created: Date.now() / 1000, shape};
-        const created = [outline];
-        if (band != null) created.push({id: newId(), name: `${name} perimeter`, source: target.source, parent: outline.id, box: shapeBox(shape, 'ring', band, z), created: Date.now() / 1000, ring: {expand: band}});
-        void saveSlices([...slices, ...created]);
-        setChecked(c => { const n = new Set(c); n.delete(target.parent ? target.parent.id : target.source); for (const x of created) n.add(x.id); return n; });
-        setSelected(outline.id);
+        setSlicing(false);
+        setPlacing({name, vertices: centred(vertices), band, source: target.source, parent: target.parent, z, position: centre, rotation: 0});
         if (mode === 'persp') setMode('top');
       }} />);
+  }
+  /** Turn the placed outline into slices at its current position. */
+  function crop() {
+    if (!placing) return;
+    const shape: Shape = {vertices: placing.vertices, position: placing.position, rotation: placing.rotation};
+    const outline: Slice = {id: newId(), name: placing.name, source: placing.source, parent: placing.parent?.id ?? null, box: shapeBox(shape, 'inside', 0, placing.z), created: Date.now() / 1000, shape};
+    const created = [outline];
+    if (placing.band != null) created.push({id: newId(), name: `${placing.name} perimeter`, source: placing.source, parent: outline.id, box: shapeBox(shape, 'ring', placing.band, placing.z), created: Date.now() / 1000, ring: {expand: placing.band}});
+    void saveSlices([...slices, ...created]);
+    const parentId = placing.parent ? placing.parent.id : placing.source;
+    setChecked(c => { const n = new Set(c); n.delete(parentId); for (const x of created) n.add(x.id); return n; });
+    setSelected(outline.id);
+    setPlacing(null);
   }
   openOutlineRef.current = openOutlineDialog;
   function updateShape(slice: Slice, shape: Shape) {
@@ -505,7 +546,8 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       if (e.key === '7') setMode('top'); else if (e.key === '1') setMode('front'); else if (e.key === '3') setMode('side'); else if (e.key === '5') setMode('persp');
       else if (e.key === 'f') renderer.current?.frameVisible(true);
       else if (e.key === 's') (slicing ? setSlicing(false) : startSlicing());
-      else if (e.key === 'Escape') { if (draft) setDraft(null); else if (slicing) setSlicing(false); else if (calibrating) endCalibration(false); }
+      else if (e.key === 'Escape') { if (placing) setPlacing(null); else if (draft) setDraft(null); else if (slicing) setSlicing(false); else if (calibrating) endCalibration(false); }
+      else if (e.key === 'Enter' && placing) crop();
       else if (e.key === 'Enter' && draft && slicing) commitDraft();
       else if ((e.key === 'Backspace' || e.key === 'Delete') && selectedSlice) deleteSlice(selectedSlice);
     };
@@ -541,7 +583,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       <div className={'canvas-host' + (drawing ? ' drawing' : '')} ref={host} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
         <canvas ref={canvas} />
         {drawing && draft && <Rubber a={toScreen(draft.p1)} b={toScreen(draft.p2)} key={viewTick} />}
-        {mode !== 'persp' && sliceTarget && (slicing || calibrating || canMoveOutline) && (
+        {mode !== 'persp' && (placing || (sliceTarget && (slicing || calibrating || canMoveOutline))) && (
           <div className="rotate" onPointerDown={e => e.stopPropagation()}>
             <span className="angle"><b>{rotationLabel.name}</b> {rotationLabel.value.toFixed(1)}°</span>
             <span className="buttons">
@@ -557,6 +599,13 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
             <button onClick={() => endCalibration(false)}>Cancel</button>
             <button onClick={saveCalibrationAs}>Save as…</button>
             <button className="primary" onClick={() => endCalibration(true)}>Save</button>
+          </div>
+        )}
+        {placing && (
+          <div className="slicebar" onPointerDown={e => e.stopPropagation()}>
+            <span>{mode === 'top' ? `Drag ${placing.name} into place and turn it with the corner buttons, then press Crop.` : 'Switch to Top to place the outline.'}</span>
+            <button onClick={() => setPlacing(null)}>Cancel</button>
+            <button className="primary" onClick={crop}>Crop</button>
           </div>
         )}
         {canMoveOutline && !drawing && (
@@ -625,8 +674,12 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
             {!sources.length && <p className="muted pad">Nothing to show yet.</p>}
           </div>
           )}
-          {selectedSlice && !calibrating && !selectedShape && <BoundsEditor slice={selectedSlice} onChange={box => updateBox(selectedSlice, box)} />}
-          {selectedSlice && !calibrating && selectedShape && movableOutline?.shape && (
+          {placing && (
+            <OutlineEditor slice={{id: 'placing', name: placing.name, source: placing.source, parent: null, box: [[0, 0, 0], [0, 0, 0]], created: 0}} shape={{vertices: placing.vertices, position: placing.position, rotation: placing.rotation}}
+              onShape={sh => setPlacing({...placing, position: sh.position, rotation: sh.rotation})} onExpand={() => {}} />
+          )}
+          {!placing && selectedSlice && !calibrating && !selectedShape && <BoundsEditor slice={selectedSlice} onChange={box => updateBox(selectedSlice, box)} />}
+          {!placing && selectedSlice && !calibrating && selectedShape && movableOutline?.shape && (
             <OutlineEditor slice={selectedSlice} shape={movableOutline.shape} onShape={shape => updateShape(movableOutline, shape)} onExpand={v => updateRing(selectedSlice, v)} />
           )}
           {!calibrating && <footer>
