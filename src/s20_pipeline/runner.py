@@ -64,6 +64,8 @@ def resume_identity(job):
         if k not in RESOURCE_OPTIONS and k not in DIAGNOSTIC_OPTIONS
     }
     options.setdefault("collector", "cpu")
+    options.setdefault("photo_matching", "exact")
+    options.setdefault("keyframe_percent", 30)
     inputs = {
         k: v
         for k, v in job.get("source_identities", {}).items()

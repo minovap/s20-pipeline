@@ -83,6 +83,16 @@ def parser():
             help="Candidate collector (default: cpu; Metal is validated but opt-in)",
         )
         c.add_argument(
+            "--photo-matching",
+            choices=["exact", "keyframes"],
+            help="Exact matching or coverage-selected keyframes (default: exact)",
+        )
+        c.add_argument(
+            "--keyframe-percent",
+            type=int,
+            help="Percent of calibrated photos used for fast matching (default: 30)",
+        )
+        c.add_argument(
             "--collector-diagnostics",
             action="store_true",
             help="Compare Metal projection, packed depths, blockers and visibility with CPU",
@@ -113,6 +123,29 @@ def selected_collector(args):
             previous = json.loads(receipt.read_text())
             return previous.get("options", {}).get("collector", "cpu")
     return "cpu"
+
+
+def selected_photo_matching(args):
+    """Keep old runs on exact matching when they predate this option."""
+    if args.photo_matching is not None:
+        return args.photo_matching
+    if args.resume:
+        receipt = args.output.resolve() / "job.json"
+        if receipt.is_file():
+            previous = json.loads(receipt.read_text())
+            return previous.get("options", {}).get("photo_matching", "exact")
+    return "exact"
+
+
+def selected_keyframe_percent(args):
+    if args.keyframe_percent is not None:
+        return args.keyframe_percent
+    if args.resume:
+        receipt = args.output.resolve() / "job.json"
+        if receipt.is_file():
+            previous = json.loads(receipt.read_text())
+            return previous.get("options", {}).get("keyframe_percent", 30)
+    return 30
 
 
 def prepare_job(args):
@@ -150,6 +183,16 @@ def prepare_job(args):
         )
     }
     options["collector"] = selected_collector(args)
+    options["photo_matching"] = selected_photo_matching(args)
+    options["keyframe_percent"] = (
+        selected_keyframe_percent(args)
+        if options["photo_matching"] == "keyframes"
+        else 30
+    )
+    if not 1 <= options["keyframe_percent"] <= 100:
+        raise ValueError("Fast photo matching photo percentage must be 1–100")
+    if options["photo_matching"] == "keyframes" and options["collector"] != "cpu":
+        raise ValueError("Fast photo matching requires the CPU collector")
     options.update(
         cpu_threads=args.cpu_threads if args.cpu_threads is not None else threads,
         color_workers=args.color_workers if args.color_workers is not None else workers,
@@ -236,6 +279,10 @@ def prepare_job(args):
         and (args.native_dir / "libs20_visibility.dylib").is_file()
     ):
         needed += ["libs20_visibility.dylib"]
+    if args.color and options["photo_matching"] == "keyframes" and not (
+        args.native_dir / "libs20_visibility.dylib"
+    ).is_file():
+        raise ValueError("Fast photo matching requires libs20_visibility.dylib; run s20 build")
     for name in needed:
         path = args.native_dir / name
         if not path.is_file():

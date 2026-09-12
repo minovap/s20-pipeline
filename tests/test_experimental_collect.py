@@ -12,6 +12,7 @@ from s20_pipeline.experimental_collect import (
     _photo_targets,
     build_cell_index,
     select_keyframes,
+    select_keyframes_for_scan,
 )
 
 LIBRARY = Path(__file__).parents[1] / "build/libs20_visibility.dylib"
@@ -98,3 +99,29 @@ def test_keyframes_are_balanced_and_deterministic():
     np.testing.assert_array_equal(first, second)
     assert meta["camera_counts"] == {"left": 2, "right": 2}
     assert len(first) == 4
+
+
+@native_required
+def test_long_scan_keyframe_budget_scales_in_bounded_windows():
+    rng = np.random.default_rng(23)
+    xyz = rng.uniform([-1, -1, 0.5], [1, 1, 3], (2000, 3)).astype("float32")
+    normals = (-xyz / np.linalg.norm(xyz, axis=1)[:, None]).astype("float32")
+    frames = [frame("left" if i % 2 == 0 else "right", [i * 0.01, 0, 0]) for i in range(124)]
+    native = CpuVisibility(xyz, normals, LIBRARY)
+    selected, meta = select_keyframes_for_scan(xyz, normals, frames, native)
+    assert len(selected) == 40
+    assert len(meta["windows"]) == 2
+    assert meta["selection_window_photos"] == 62
+    assert meta["selection_sample_points"] == 2000
+    assert np.count_nonzero(selected < 62) == 20
+    assert np.count_nonzero(selected >= 62) == 20
+    short, short_meta = select_keyframes_for_scan(xyz, normals, frames[:62], native)
+    assert len(short) == 20
+    assert short_meta["photo_percent"] == 30
+    reviewed, _ = select_keyframes(xyz, normals, frames[:62], native, 20)
+    np.testing.assert_array_equal(short, reviewed)
+    fewer, fewer_meta = select_keyframes_for_scan(xyz, normals, frames, native, 20)
+    assert len(fewer) == 24
+    assert fewer_meta["photo_percent"] == 20
+    with pytest.raises(ValueError, match="1–100"):
+        select_keyframes_for_scan(xyz, normals, frames, native, 0)

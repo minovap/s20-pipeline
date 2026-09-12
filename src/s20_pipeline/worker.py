@@ -101,33 +101,55 @@ def execute(stage, job):
         source = out / "photos/images.json" if job["mode"] == "run" else cameras
         masks(source, calibration, dest, cfg["mask_device"], cfg["cpu_threads"], progress)
     elif stage == "candidates":
-        from .collect import collect
-
+        photo_matching = cfg.get("photo_matching", "exact")
         collector = cfg.get("collector", "cpu")
         mask_root = (
             Path(job["masks"])
             if job.get("masks")
             else (out / "masks" if cfg["mask"] == "person" else None)
         )
-        collect(
-            geometry,
-            cameras,
-            calibration,
-            mask_root,
-            out,
-            cfg["color_workers"],
-            cfg["chunk_points"],
-            progress,
-            collector,
-            native / "libs20_collector.dylib" if collector == "metal" else None,
-            Path(job["native_sources"]) / "collector.metal"
-            if collector == "metal"
-            else None,
-            cfg.get("collector_diagnostics", False),
-            visibility_library=(native / "libs20_visibility.dylib")
-            if collector == "cpu" and (native / "libs20_visibility.dylib").is_file()
-            else None,
-        )
+        if photo_matching == "keyframes":
+            from .experimental_collect import collect_experimental
+
+            if collector != "cpu":
+                raise ValueError("Fast photo matching requires the CPU collector")
+            collect_experimental(
+                geometry,
+                cameras,
+                calibration,
+                mask_root,
+                out,
+                native / "libs20_visibility.dylib",
+                "keyframes20",
+                cfg["color_workers"],
+                cfg["chunk_points"],
+                progress,
+                keyframe_percent=cfg.get("keyframe_percent", 30),
+            )
+        elif photo_matching == "exact":
+            from .collect import collect
+
+            collect(
+                geometry,
+                cameras,
+                calibration,
+                mask_root,
+                out,
+                cfg["color_workers"],
+                cfg["chunk_points"],
+                progress,
+                collector,
+                native / "libs20_collector.dylib" if collector == "metal" else None,
+                Path(job["native_sources"]) / "collector.metal"
+                if collector == "metal"
+                else None,
+                cfg.get("collector_diagnostics", False),
+                visibility_library=(native / "libs20_visibility.dylib")
+                if collector == "cpu" and (native / "libs20_visibility.dylib").is_file()
+                else None,
+            )
+        else:
+            raise ValueError(f"Unknown photo matching mode: {photo_matching}")
     elif stage in ("global", "local"):
         from .camera import load_camera_frames
         from .exposure import Exposure

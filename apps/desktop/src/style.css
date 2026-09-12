@@ -87,6 +87,9 @@ input[type=checkbox], input[type=radio] { accent-color: var(--accent); width: 15
 .field.indent { margin-left: 26px; }
 .field .unit { display: inline-flex; align-items: center; gap: 6px; }
 .field .unit input { width: 70px; }
+.colorize-settings { border-left: 2px solid var(--line); padding-left: 14px; }
+.colorize-settings .field { margin: 8px 0; }
+.colorize-settings input[type="range"] { width: min(100%, 320px); accent-color: var(--amber); }
 
 .spinner { display: inline-block; border: 2px solid var(--line); border-top-color: var(--amber); border-radius: 50%; animation: spin 0.9s linear infinite; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }

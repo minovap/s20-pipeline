@@ -15,11 +15,23 @@ median. Timings below are single full-stage runs on the same inputs and host.
 | B: 8 cm analytic cell assignment, top 1 | 4.011 s | 1.78× | 99.80% | 82.45% | 16.68 / 255 |
 | C: 8 cm proxy visibility, top 1 | 5.375 s | 1.33× | 99.80% | 83.51% | 15.91 / 255 |
 
-Strategy A selects ten left and ten right frames by greedy weighted coverage of
-20 cm normal-split surface cells. It then runs the exact projection, depth,
+On the short scan, Strategy A selects ten left and ten right frames by greedy
+weighted coverage of 20 cm normal-split surface cells. It then runs the exact projection, depth,
 visibility, mask, scoring, and four-candidate logic on those frames. It is the
 only experiment here that exceeds the 2× goal and it has the lowest color
 drift, at the cost of losing 113,296 points covered by the exact result.
+
+The desktop app now offers Strategy A as **Fast** alongside the unchanged
+**Exact** default. The adjustable "Photos to use" percentage defaults to 30%,
+which selects the same 20 of 62 calibrated photos on the frozen short scan.
+Long captures are divided into bounded selection windows, with a deterministic
+500,000-point selection sample; the exact dense visibility pass still runs on
+all geometry for each selected photo. The long-scan speed and coverage effects
+have not yet been measured, so the ~2× figure applies to photo matching on the
+short scan, not the whole pipeline. In paired full-stage runs, Fast used 6.95
+CPU seconds versus Exact's 18.40, but sampled peak matching RSS was **higher**:
+3.05 GB versus 2.42 GB. The setting reduces CPU work, not the geometry step's
+memory use or necessarily the matching step's peak RAM.
 
 Strategy B scores all cameras analytically on 8 cm normal-split surface cells,
 assigns the best camera to every dense point in a cell, and rechecks projection,

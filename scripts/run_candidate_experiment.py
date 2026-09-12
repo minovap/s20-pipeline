@@ -20,6 +20,7 @@ def main():
     )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--chunk", type=int, default=262144)
+    parser.add_argument("--keyframe-percent", type=int, default=30)
     args = parser.parse_args()
     collect_experimental(
         args.geometry,
@@ -31,6 +32,7 @@ def main():
         args.strategy,
         args.workers,
         args.chunk,
+        keyframe_percent=args.keyframe_percent,
     )
 
 

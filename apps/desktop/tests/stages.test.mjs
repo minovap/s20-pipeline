@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {stagesFor} from '../src/types.ts';
+import {estimatedKeyframeCount, estimatedMatchingSpeedup, stagesFor} from '../src/types.ts';
 import {duration, roughRange, runFolderName} from '../src/format.ts';
 import {effectiveBox, intersect, nextSliceName, normalize, unionMask} from '../src/viewer/slices.ts';
 
@@ -16,6 +16,14 @@ test('optional stages follow effective processing options', () => {
   const ids = stagesFor({color: true, mask: 'off', exposure: 'off', pose_refinement: false}).map(s => s.id);
   assert(!ids.includes('local')); assert(!ids.includes('global')); assert(!ids.includes('masks')); assert(!ids.includes('pose_refinement'));
   assert(ids.includes('blend')); assert(ids.includes('export'));
+});
+test('fast photo percentage gives the tested short-scan budget and scales up', () => {
+  assert.equal(estimatedKeyframeCount(62, 30), 20);
+  assert.equal(estimatedKeyframeCount(124, 30), 40);
+  assert.equal(estimatedKeyframeCount(124, 20), 24);
+  assert.equal(estimatedKeyframeCount(0, 30), 0);
+  assert(estimatedMatchingSpeedup(62, 30) > 1.8);
+  assert.equal(estimatedMatchingSpeedup(62, 100), 1);
 });
 test('durations never show fractions of a second', () => {
   assert.equal(duration(null), '');

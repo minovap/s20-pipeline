@@ -1,8 +1,8 @@
 """Opt-in approximate photo-to-point experiments.
 
-These collectors deliberately trade exact candidate parity for speed.  They
-are kept out of the production CLI until their visual and numerical quality is
-understood on more than the frozen indoor scan.
+These collectors deliberately trade exact candidate parity for speed. Only
+the coverage-selected keyframe variant is available in the desktop app; the
+single-view variants remain research scripts.
 """
 
 from __future__ import annotations
@@ -148,6 +148,61 @@ def select_keyframes(xyz, normals, frames, native, count=20):
         "coverage_fraction": float(np.mean(covered)),
         "mean_best_normalized_quality": float(np.average(best, weights=weights)),
         "mean_second_normalized_quality": float(np.average(second, weights=weights)),
+    }
+
+
+def _keyframe_window_count(photo_count, photo_percent):
+    count = min(photo_count, max(1, round(photo_count * photo_percent / 100)))
+    # S20 photos come from two cameras; retain an even budget for full windows
+    # so the greedy selector can balance left and right views.
+    if photo_count >= 20 and count % 2 and count < photo_count:
+        count += 1
+    return count
+
+
+def select_keyframes_for_scan(xyz, normals, frames, native, photo_percent=30):
+    """Keep the tested 20-of-62 selection, scaling its budget for longer scans.
+
+    Long captures are split into bounded photo windows and selection uses a
+    deterministic geometry sample. This bounds the quality matrix instead of
+    allocating one cell-by-all-photos matrix for the full capture.
+    """
+    if not frames:
+        raise ValueError("Fast photo matching requires calibrated photos")
+    if not 1 <= photo_percent <= 100:
+        raise ValueError("Fast photo matching photo percentage must be 1–100")
+    window_size = 62
+    if len(frames) <= window_size:
+        count = _keyframe_window_count(len(frames), photo_percent)
+        selected, meta = select_keyframes(xyz, normals, frames, native, count)
+        meta["photo_percent"] = photo_percent
+        return selected, meta
+    sample_count = min(len(xyz), 500_000)
+    sample_ids = np.linspace(0, len(xyz) - 1, sample_count, dtype=np.int64)
+    sample_xyz = xyz[sample_ids]
+    sample_normals = normals[sample_ids]
+    selected = []
+    windows = []
+    for start in range(0, len(frames), window_size):
+        subset = frames[start : start + window_size]
+        count = _keyframe_window_count(len(subset), photo_percent)
+        local, info = select_keyframes(sample_xyz, sample_normals, subset, native, count)
+        selected.extend((local + start).tolist())
+        windows.append(
+            {
+                "start": start,
+                "photos": len(subset),
+                "selected": (local + start).tolist(),
+                "covered_cells": info["covered_cells"],
+                "coverage_fraction": info["coverage_fraction"],
+            }
+        )
+    return np.asarray(sorted(selected), dtype=np.uint32), {
+        "selection_window_photos": window_size,
+        "photo_percent": photo_percent,
+        "selection_sample_points": sample_count,
+        "selected": sorted(selected),
+        "windows": windows,
     }
 
 
@@ -409,6 +464,7 @@ def _run_dense(
     cached_depth_root=None,
     visibility=True,
     candidate_slots=4,
+    progress=None,
 ):
     dest = output / "candidates"
     dest.mkdir(parents=True, exist_ok=False)
@@ -441,6 +497,8 @@ def _run_dense(
             )
             rows.append(row)
             print(json.dumps({"event": "photo", "done": done, "total": len(photos), **row}), flush=True)
+            if progress is not None:
+                progress(done, len(photos))
     native.release_geometry()
     observations, finalize = _finalize_observations(
         dest, observations, frames, chunk, (8, 6), workers, native
@@ -561,6 +619,8 @@ def collect_experimental(
     strategy: str,
     workers: int = 8,
     chunk: int = 262144,
+    progress=None,
+    keyframe_percent: int = 30,
 ):
     """Run one of the three named approximate candidate experiments."""
     if strategy not in {"keyframes20", "cell1", "proxy8cm"}:
@@ -572,7 +632,9 @@ def collect_experimental(
         raise ValueError("Experimental collector currently requires uint32 source IDs")
     native = CpuVisibility(xyz, normals, visibility_library)
     if strategy == "keyframes20":
-        selected, strategy_meta = select_keyframes(xyz, normals, frames, native, 20)
+        selected, strategy_meta = select_keyframes_for_scan(
+            xyz, normals, frames, native, keyframe_percent
+        )
         _run_dense(
             xyz,
             normals,
@@ -587,6 +649,7 @@ def collect_experimental(
             None,
             strategy,
             strategy_meta,
+            progress=progress,
         )
     elif strategy == "cell1":
         cells, shortlist, strategy_meta = build_photo_shortlist(

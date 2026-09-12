@@ -17,7 +17,7 @@ const root = '/Users/demo/Documents/S20 Projects';
 const completedRun: Run = {
   path: `${root}/Garden/runs/2026-09-10 14-02-11`, name: '2026-09-10 14-02-11', status: 'completed', stage: null, error: null,
   started: now - 86400 - 2000, finished: now - 86400 - 2000 + 1493, capture: '/Volumes/SD_CARD/Garden-2026-09-10',
-  options: {color: true, mask: 'person', exposure: 'local', pose_refinement: true, resources: 'throughput', memory_gb: 16},
+  options: {color: true, mask: 'person', exposure: 'local', photo_matching: 'exact', keyframe_percent: 30, pose_refinement: true, resources: 'throughput', memory_gb: 16},
   stages: [['decode', 41], ['pack', 12], ['tracking', 318], ['pose_refinement', 96], ['registered', 8], ['geometry', 64], ['photos', 22], ['cameras', 5], ['masks', 71], ['candidates', 402], ['global', 39], ['local', 188], ['blend', 201], ['export', 26]].map(([id, w]) => ({id: id as string, status: 'complete' as const, wall_s: w as number})),
   result: `${root}/Garden/runs/2026-09-10 14-02-11/export/colorized.las`, result_points: 6021344,
 };

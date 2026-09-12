@@ -14,8 +14,27 @@ export type Input = {path: string; name: string; added: number; capture: Capture
 /** External drives on macOS mount under /Volumes. */
 export const onExternalDrive = (path: string) => path.startsWith('/Volumes/');
 
-export type Options = {resources: string; memory_gb: number; color: boolean; mask: string; exposure: string; pose_refinement: boolean; copy?: boolean};
-export const DEFAULT_OPTIONS: Options = {resources: 'balanced', memory_gb: 16, color: true, mask: 'person', exposure: 'local', pose_refinement: true};
+export type PhotoMatching = 'exact' | 'keyframes';
+export type Options = {resources: string; memory_gb: number; color: boolean; mask: string; exposure: string; photo_matching: PhotoMatching; keyframe_percent: number; pose_refinement: boolean; copy?: boolean};
+export const DEFAULT_OPTIONS: Options = {resources: 'balanced', memory_gb: 16, color: true, mask: 'person', exposure: 'local', photo_matching: 'exact', keyframe_percent: 30, pose_refinement: true};
+
+export function estimatedKeyframeCount(photos: number, percent: number) {
+  let selected = 0;
+  for (let start = 0; start < photos; start += 62) {
+    const window = Math.min(62, photos - start);
+    let count = Math.min(window, Math.max(1, Math.round(window * percent / 100)));
+    if (window >= 20 && count % 2 && count < window) count += 1;
+    selected += count;
+  }
+  return selected;
+}
+
+/** Matching-stage estimate fitted to paired 62-photo runs, not whole-pipeline time. */
+export function estimatedMatchingSpeedup(photos: number, percent: number) {
+  if (photos <= 0) return 1;
+  const selectedFraction = estimatedKeyframeCount(photos, percent) / photos;
+  return 1 / (0.31 + 0.69 * selectedFraction);
+}
 
 export type Job = Options & {capture: string; output: string; resume: boolean};
 

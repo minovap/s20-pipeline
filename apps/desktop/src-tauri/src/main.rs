@@ -286,6 +286,8 @@ fn read_run(folder: &Path) -> Option<Value> {
             "pose_refinement": job["options"]["pose_refinement"],
             "resources": job["options"]["resources"],
             "memory_gb": job["options"]["memory_gb"],
+            "photo_matching": job["options"]["photo_matching"].as_str().unwrap_or("exact"),
+            "keyframe_percent": job["options"]["keyframe_percent"].as_u64().unwrap_or(30),
         },
         "stages": stages,
         "result": if result_exists { json!(result) } else { Value::Null },
@@ -505,6 +507,9 @@ fn delete_export(path: String, state: State<Engine>) -> Result<(), String> {
 
 // ---------------------------------------------------------------- jobs
 
+fn default_photo_matching() -> String { "exact".into() }
+fn default_keyframe_percent() -> u32 { 30 }
+
 #[derive(Deserialize, Serialize, Clone)]
 struct JobOptions {
     capture: String,
@@ -514,6 +519,10 @@ struct JobOptions {
     color: bool,
     mask: String,
     exposure: String,
+    #[serde(default = "default_photo_matching")]
+    photo_matching: String,
+    #[serde(default = "default_keyframe_percent")]
+    keyframe_percent: u32,
     pose_refinement: bool,
     resume: bool,
     #[serde(default)]
@@ -523,6 +532,8 @@ fn job_args(o: &JobOptions) -> Result<Vec<String>, String> {
     if !["interactive", "balanced", "throughput"].contains(&o.resources.as_str())
         || !["person", "off"].contains(&o.mask.as_str())
         || !["local", "global", "off"].contains(&o.exposure.as_str())
+        || !["exact", "keyframes"].contains(&o.photo_matching.as_str())
+        || !(1..=100).contains(&o.keyframe_percent)
         || !o.memory_gb.is_finite()
         || o.memory_gb < 1.
         || o.memory_gb > 1024.
@@ -544,6 +555,10 @@ fn job_args(o: &JobOptions) -> Result<Vec<String>, String> {
         o.mask.clone(),
         "--exposure".into(),
         o.exposure.clone(),
+        "--photo-matching".into(),
+        o.photo_matching.clone(),
+        "--keyframe-percent".into(),
+        o.keyframe_percent.to_string(),
     ];
     if o.color {
         a.extend([
@@ -1051,6 +1066,8 @@ mod tests {
             color: true,
             mask: "person".into(),
             exposure: "local".into(),
+            photo_matching: "exact".into(),
+            keyframe_percent: 30,
             pose_refinement: true,
             resume: false,
             copy: false,
@@ -1063,6 +1080,8 @@ mod tests {
         assert_eq!(args[3], o.capture);
         assert_eq!(args[5], o.output);
         assert!(args.contains(&"--camera-convention".into()));
+        assert!(args.windows(2).any(|a| a == ["--photo-matching", "exact"]));
+        assert!(args.windows(2).any(|a| a == ["--keyframe-percent", "30"]));
     }
     #[test]
     fn invalid_options_rejected() {
@@ -1072,6 +1091,27 @@ mod tests {
         o.memory_gb = 16.;
         o.resources = "other".into();
         assert!(job_args(&o).is_err());
+        o.resources = "balanced".into();
+        o.photo_matching = "other".into();
+        assert!(job_args(&o).is_err());
+        o.photo_matching = "keyframes".into();
+        o.keyframe_percent = 0;
+        assert!(job_args(&o).is_err());
+    }
+    #[test]
+    fn fast_photo_matching_is_passed_to_pipeline() {
+        let mut o = options();
+        o.photo_matching = "keyframes".into();
+        let args = job_args(&o).unwrap();
+        assert!(args.windows(2).any(|a| a == ["--photo-matching", "keyframes"]));
+        let old = serde_json::json!({
+            "capture": "/scan", "output": "/run", "resources": "balanced",
+            "memory_gb": 16.0, "color": true, "mask": "person", "exposure": "local",
+            "pose_refinement": true, "resume": false
+        });
+        let parsed: JobOptions = serde_json::from_value(old).unwrap();
+        assert_eq!(parsed.photo_matching, "exact");
+        assert_eq!(parsed.keyframe_percent, 30);
     }
     #[test]
     fn geometry_only_and_resume_are_explicit() {

@@ -327,7 +327,7 @@ def test_resume_identity_ignores_code_and_resource_changes():
 
 
 def test_collector_default_preserves_historical_resume(tmp_path):
-    from s20_pipeline.cli import parser, selected_collector
+    from s20_pipeline.cli import parser, selected_collector, selected_photo_matching
 
     output = tmp_path / "run"
     output.mkdir()
@@ -336,11 +336,13 @@ def test_collector_default_preserves_historical_resume(tmp_path):
         ["run", str(tmp_path / "capture"), "--output", str(output), "--resume", "--no-color"]
     )
     assert selected_collector(historical) == "cpu"
+    assert selected_photo_matching(historical) == "exact"
 
     fresh = parser().parse_args(
         ["run", str(tmp_path / "capture"), "--output", str(tmp_path / "fresh"), "--no-color"]
     )
     assert selected_collector(fresh) == "cpu"
+    assert selected_photo_matching(fresh) == "exact"
 
     explicit = parser().parse_args(
         [
@@ -355,3 +357,73 @@ def test_collector_default_preserves_historical_resume(tmp_path):
         ]
     )
     assert selected_collector(explicit) == "metal"
+
+
+def test_photo_matching_resume_keeps_requested_mode(tmp_path):
+    from s20_pipeline.cli import parser, selected_keyframe_percent, selected_photo_matching
+
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "job.json").write_text(
+        '{"options": {"photo_matching": "keyframes", "keyframe_percent": 24}}'
+    )
+    resumed = parser().parse_args(
+        ["run", str(tmp_path / "capture"), "--output", str(output), "--resume", "--no-color"]
+    )
+    assert selected_photo_matching(resumed) == "keyframes"
+    assert selected_keyframe_percent(resumed) == 24
+    explicit = parser().parse_args(
+        [
+            "run", str(tmp_path / "capture"), "--output", str(output), "--resume",
+            "--no-color", "--photo-matching", "exact",
+        ]
+    )
+    assert selected_photo_matching(explicit) == "exact"
+    budget = parser().parse_args(
+        [
+            "run", str(tmp_path / "capture"), "--output", str(output), "--resume",
+            "--no-color", "--photo-matching", "keyframes", "--keyframe-percent", "20",
+        ]
+    )
+    assert budget.keyframe_percent == 20
+    assert selected_keyframe_percent(budget) == 20
+
+
+def test_candidate_worker_keeps_exact_and_routes_fast_mode(tmp_path, monkeypatch):
+    from s20_pipeline.worker import execute
+
+    calls = []
+    monkeypatch.setattr(
+        "s20_pipeline.collect.collect",
+        lambda *args, **kwargs: calls.append(("exact", args, kwargs)),
+    )
+    monkeypatch.setattr(
+        "s20_pipeline.experimental_collect.collect_experimental",
+        lambda *args, **kwargs: calls.append(("keyframes", args, kwargs)),
+    )
+    job = {
+        "mode": "colorize",
+        "output": str(tmp_path / "run"),
+        "geometry": str(tmp_path / "geometry.ply"),
+        "cameras": str(tmp_path / "frames.json"),
+        "calibration": str(tmp_path / "calibration.yaml"),
+        "native": str(tmp_path / "native"),
+        "native_sources": str(tmp_path / "sources"),
+        "options": {
+            "mask": "off", "collector": "cpu", "color_workers": 4,
+            "chunk_points": 262144, "photo_matching": "exact",
+        },
+    }
+    execute("candidates", job)
+    assert calls[0][0] == "exact"
+    assert calls[0][1][6] == 262144
+    job["options"]["photo_matching"] = "keyframes"
+    execute("candidates", job)
+    assert calls[1][0] == "keyframes"
+    assert calls[1][1][6] == "keyframes20"
+    assert calls[1][1][8] == 262144
+    assert callable(calls[1][1][9])
+    assert calls[1][2]["keyframe_percent"] == 30
+    job["options"]["keyframe_percent"] = 20
+    execute("candidates", job)
+    assert calls[2][2]["keyframe_percent"] == 20

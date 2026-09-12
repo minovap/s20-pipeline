@@ -127,7 +127,7 @@ function App() {
   // Review mode: ?mock&screen=running starts a simulated run on load.
   useEffect(() => {
     if (!mock || new URLSearchParams(location.search).get('screen') !== 'running' || !settings) return;
-    void api.openProject('').then(p => startRun(p, p.inputs[0], {resources: 'throughput', memory_gb: 16, color: true, mask: 'person', exposure: 'local', pose_refinement: true}));
+    void api.openProject('').then(p => startRun(p, p.inputs[0], {resources: 'throughput', memory_gb: 16, color: true, mask: 'person', exposure: 'local', photo_matching: 'exact', keyframe_percent: 30, pose_refinement: true}));
   }, [settings]);
 
   if (!inTauri && !mock) return <div className="center"><p>Open S20 Studio through the desktop app.</p></div>;

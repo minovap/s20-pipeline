@@ -6,8 +6,8 @@ import {basename, bytes, count, duration, roughRange, when} from './format';
 import {Pipeline} from './Pipeline';
 import {statusWord} from './Projects';
 import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, Toggle, useContextMenu} from './ui';
-import {DEFAULT_OPTIONS, onExternalDrive, stagesFor} from './types';
-import type {Input, Options, Project, Run, Settings, StageState} from './types';
+import {DEFAULT_OPTIONS, estimatedKeyframeCount, estimatedMatchingSpeedup, onExternalDrive, stagesFor} from './types';
+import type {Input, Options, PhotoMatching, Project, Run, Settings, StageState} from './types';
 import type {LiveRun} from './main';
 
 type Selection = {kind: 'new'} | {kind: 'run'; path: string};
@@ -218,7 +218,10 @@ export function explainError(message: string | null | undefined, memoryGb?: numb
 function NewRun({project, settings, busy, available, onAddInput, onStart}:
   {project: Project; settings: Settings; busy: boolean; available: Record<string, boolean>; onAddInput: () => void; onStart: (input: Input, options: Options) => Promise<void>}) {
   const key = `options:${project.path}`;
-  const [options, setOptions] = useState<Options>(() => { try { return {...DEFAULT_OPTIONS, ...JSON.parse(localStorage.getItem(key) ?? '{}')}; } catch { return DEFAULT_OPTIONS; } });
+  const [options, setOptions] = useState<Options>(() => { try {
+    const saved = {...DEFAULT_OPTIONS, ...JSON.parse(localStorage.getItem(key) ?? '{}')};
+    return {...saved, keyframe_percent: Math.max(10, Math.min(100, Math.round(saved.keyframe_percent / 10) * 10))};
+  } catch { return DEFAULT_OPTIONS; } });
   useEffect(() => { localStorage.setItem(key, JSON.stringify(options)); }, [key, options]);
   // First time on this Mac: allow the pipeline about two thirds of installed memory.
   useEffect(() => {
@@ -253,6 +256,19 @@ function NewRun({project, settings, busy, available, onAddInput, onStart}:
         <Segmented value={options.exposure} disabled={!options.color} onChange={v => set({exposure: v})} options={[{value: 'local', label: 'Local'}, {value: 'global', label: 'Global'}, {value: 'off', label: 'Off'}]} />
         <small>{options.exposure === 'local' ? 'Evens out lighting within each photo and between photos.' : options.exposure === 'global' ? 'Evens out lighting between photos only.' : 'Photos are blended as recorded.'}</small>
       </div>
+      {options.color && <div className="field"><span>Colorize pointcloud</span>
+        <div className="colorize-settings">
+          <div className="field"><span>Photo matching</span>
+            <Segmented<PhotoMatching> value={options.photo_matching} onChange={v => set({photo_matching: v})} options={[{value: 'exact', label: 'Exact'}, {value: 'keyframes', label: 'Fast'}]} />
+            <small>{options.photo_matching === 'exact' ? 'Checks every photo for the best coverage.' : 'Recommended for larger scans. Faster matching, with possible color gaps.'}</small>
+          </div>
+          {options.photo_matching === 'keyframes' && <div className="field">
+            <label htmlFor="keyframe-percent">Photos to use: {options.keyframe_percent}%</label>
+            <input id="keyframe-percent" type="range" min={10} max={100} step={10} value={options.keyframe_percent} onChange={e => set({keyframe_percent: Number(e.target.value)})} />
+            <small>About {estimatedKeyframeCount(input?.capture.photos ?? 0, options.keyframe_percent)} of {input?.capture.photos ?? 0} recorded photos. {options.keyframe_percent === 100 ? 'Use Exact for all photos.' : input?.capture.photos ? `Estimated matching speed: ~${estimatedMatchingSpeedup(input.capture.photos, options.keyframe_percent).toFixed(1)}× faster (short-scan model).` : 'Matching speed estimate unavailable.'}</small>
+          </div>}
+        </div>
+      </div>}
       <div className="field"><span>Performance</span>
         <Segmented value={options.resources} onChange={v => set({resources: v})} options={[{value: 'interactive', label: 'Light'}, {value: 'balanced', label: 'Balanced'}, {value: 'throughput', label: 'Max'}]} />
         <small>{options.resources === 'throughput' ? 'Uses every CPU core. The Mac will feel slow while it runs.' : options.resources === 'interactive' ? 'Leaves most of the CPU free for other work.' : 'Up to 8 cores.'}</small>
@@ -309,7 +325,7 @@ function RunDetail({run, live, project, busy, onCancel, onResume, onOpenViewer, 
       <div className="run-head">
         <div>
           <h2>{when(started ? started / 1000 : null) || run.name}</h2>
-          <span className="muted">{input?.name ?? basename(run.capture)}, {run.options.color ? 'colored' : 'geometry only'}{run.options.color && run.options.mask === 'person' ? ', people removed' : ''}, {run.options.resources === 'throughput' ? 'max' : run.options.resources === 'interactive' ? 'light' : 'balanced'} performance{run.options.copy ? ', copied first' : ''}</span>
+          <span className="muted">{input?.name ?? basename(run.capture)}, {run.options.color ? 'colored' : 'geometry only'}{run.options.color && run.options.mask === 'person' ? ', people removed' : ''}{run.options.color && run.options.photo_matching === 'keyframes' ? `, fast photo matching (${run.options.keyframe_percent ?? 30}%)` : ''}, {run.options.resources === 'throughput' ? 'max' : run.options.resources === 'interactive' ? 'light' : 'balanced'} performance{run.options.copy ? ', copied first' : ''}</span>
         </div>
         <div className="row">
           {(status === 'running' || status === 'starting') && <button className="danger" onClick={onCancel}><Square size={13} />Cancel</button>}
