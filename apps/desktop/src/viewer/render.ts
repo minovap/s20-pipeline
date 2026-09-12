@@ -10,11 +10,12 @@ export type ViewMode = 'persp' | 'top' | 'front' | 'side';
 export const DEPTH_AXIS: Record<Exclude<ViewMode, 'persp'>, 0 | 1 | 2> = {top: 2, front: 1, side: 0};
 
 const VERT = `
-uniform float pointSize; attribute vec3 color; attribute float visible; varying vec3 vColor;
+uniform float pointSize; uniform vec2 zRange; attribute vec3 color; attribute float visible; varying vec3 vColor;
 void main(){
   vColor = color;
-  if (visible < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 world = modelMatrix * vec4(position, 1.0);
+  if (visible < 0.5 || world.z < zRange.x || world.z > zRange.y) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  gl_Position = projectionMatrix * viewMatrix * world;
   gl_PointSize = pointSize;
 }`;
 const FRAG = `
@@ -39,7 +40,23 @@ export class CloudRenderer {
   flipped = false;
   compare: string | null = null;
   pointSize = 1.6;
+  /** Height window in scene z; points outside are hidden by the shader. */
+  private zWindow: [number, number] = [-1e9, 1e9];
   onChange: (() => void) | null = null;
+
+  /** Hide points below `lo` or above `hi` (world z); null lifts the limit. */
+  setHeightWindow(lo: number | null, hi: number | null) {
+    const oz = this.worldOrigin?.z ?? 0;
+    this.zWindow = [lo == null ? -1e9 : lo - oz, hi == null ? 1e9 : hi - oz];
+    for (const e of this.entries.values()) (e.material.uniforms.zRange.value as THREE.Vector2).set(this.zWindow[0], this.zWindow[1]);
+    this.draw();
+  }
+  /** World z extent of the shown clouds, for the height slider. */
+  worldZRange(): [number, number] | null {
+    const b = this.shownBounds();
+    if (!b || !this.worldOrigin) return null;
+    return [b.min.z + this.worldOrigin.z, b.max.z + this.worldOrigin.z];
+  }
 
   constructor(private canvas: HTMLCanvasElement, private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({canvas, antialias: false, powerPreference: 'high-performance'});
@@ -116,7 +133,7 @@ export class CloudRenderer {
       const visible = new THREE.BufferAttribute(new Float32Array(n).fill(1), 1);
       visible.setUsage(THREE.DynamicDrawUsage);
       geometry.setAttribute('visible', visible);
-      const material = new THREE.ShaderMaterial({uniforms: {pointSize: {value: this.pointSize * Math.min(devicePixelRatio, 2)}}, vertexShader: VERT, fragmentShader: FRAG});
+      const material = new THREE.ShaderMaterial({uniforms: {pointSize: {value: this.pointSize * Math.min(devicePixelRatio, 2)}, zRange: {value: new THREE.Vector2(this.zWindow[0], this.zWindow[1])}}, vertexShader: VERT, fragmentShader: FRAG});
       const points = new THREE.Points(geometry, material);
       points.frustumCulled = false;
       points.position.copy(new THREE.Vector3(...(cloud.info.origin as [number, number, number])).sub(this.worldOrigin));

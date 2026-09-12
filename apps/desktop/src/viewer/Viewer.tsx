@@ -36,6 +36,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const [totals, setTotals] = useState<Record<string, number>>({});
   const [panel, setPanel] = useState(true);
   const [scale, setScale] = useState<number | null>(null);
+  /** Height window (world z) that hides points above and below; null means no limit on that side. */
+  const [heightWindow, setHeightWindow] = useState<{lo: number | null; hi: number | null}>({lo: null, hi: null});
+  const [zRange, setZRange] = useState<[number, number] | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   /** An outline being placed before it becomes a slice: dragged and turned over the whole cloud, then cropped. */
   type Placing = {name: string; vertices: XY[]; band: number | null; source: string; parent: Slice | null; z: [number, number]; position: [number, number]; rotation: number};
@@ -90,6 +93,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     setSelected(slice ? slice.id : first);
     if (params.get('calibrate')) setTimeout(() => startCalibration(first), 800);
     if (params.get('outline')) setTimeout(() => openOutlineRef.current(), 2500);
+    if (params.get('zhi')) setTimeout(() => setHeightWindow({lo: params.get('zlo') ? +params.get('zlo')! : null, hi: +params.get('zhi')!}), 2500);
     if (params.get('place')) setTimeout(() => setPlacing({name: 'Lyckan 8', vertices: centred(LYCKAN_8), band: 2, source: first, parent: null, z: [-1, 5], position: [0, 0], rotation: 20}), 2500);
   }, [project, sources, focus]);
 
@@ -161,7 +165,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     }
     // Frame the first thing that becomes visible, after its mask is in place.
     if (firstFrame.current && clouds.size) { firstFrame.current = false; r.frameVisible(); }
+    setZRange(r.worldZRange());
   }, [checked, slices, clouds, orientations]);
+  useEffect(() => { renderer.current?.setHeightWindow(heightWindow.lo, heightWindow.hi); }, [heightWindow, clouds]);
 
   const selectedSlice = slices.find(s => s.id === selected) ?? null;
   const selectedShape = selectedSlice ? shapeOf(selectedSlice, slices) : null;
@@ -490,7 +496,8 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       const source = slice ? slice.source : id;
       const region = slice ? effectiveRegion(slice, slices) : (() => { const b = worldBoxOf(id); return b ? {box: b, tests: []} : null; })();
       if (!region) { onError(`${slice?.name ?? basename(id)} is not loaded yet.`); return null; }
-      groups.set(source, [...(groups.get(source) ?? []), {box: region.box, polygons: region.tests.map(t => ({vertices: t.vertices, mode: t.mode, expand: t.expand}))}]);
+      const box: Box = [[region.box[0][0], region.box[0][1], Math.max(region.box[0][2], heightWindow.lo ?? -Infinity)], [region.box[1][0], region.box[1][1], Math.min(region.box[1][2], heightWindow.hi ?? Infinity)]];
+      groups.set(source, [...(groups.get(source) ?? []), {box, polygons: region.tests.map(t => ({vertices: t.vertices, mode: t.mode, expand: t.expand}))}]);
     }
     return [...groups].map(([p, regions]) => ({path: p, regions, transform: transformFor(orientations[p], clouds.get(p)?.info.origin ?? [0, 0, 0])}));
   }
@@ -625,6 +632,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
           <div className="viewer-empty">{loading.size ? <><Spinner /> Loading point cloud</> : sources.length ? 'Check a point cloud on the right to show it.' : 'No point clouds in this project yet. Process a scan or import a LAS or PLY file.'}</div>
         )}
         {scale != null && <ScaleBar metresPerPixel={scale} />}
+        {zRange && clouds.size > 0 && <HeightSlider range={zRange} value={heightWindow} onChange={setHeightWindow} />}
       </div>
 
       <div className="toolbar">
@@ -918,6 +926,44 @@ function PointShare({percent, clouds, totals, onDraft, onCommit}:
         onChange={e => onDraft(+e.target.value)} onPointerUp={e => onCommit(+(e.target as HTMLInputElement).value)} onKeyUp={e => onCommit(+(e.target as HTMLInputElement).value)} />
       <b>{value}%</b>
     </label>
+  );
+}
+
+/** Two handles on a vertical track: hide points above the top handle and below the bottom one. Double-click resets. */
+function HeightSlider({range, value, onChange}: {range: [number, number]; value: {lo: number | null; hi: number | null}; onChange: (v: {lo: number | null; hi: number | null}) => void}) {
+  const track = useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<'lo' | 'hi' | null>(null);
+  const [lo, hi] = [value.lo ?? range[0], value.hi ?? range[1]];
+  const span = Math.max(range[1] - range[0], 1e-6);
+  const pct = (z: number) => (100 * (Math.min(Math.max(z, range[0]), range[1]) - range[0])) / span;
+  const zAt = (clientY: number) => {
+    const r = track.current!.getBoundingClientRect();
+    const t = Math.min(1, Math.max(0, (r.bottom - clientY) / r.height));
+    return range[0] + t * span;
+  };
+  const move = (which: 'lo' | 'hi', z: number) => {
+    const snapped = Math.round(z * 100) / 100;
+    if (which === 'lo') onChange({lo: snapped <= range[0] + span * 0.002 ? null : Math.min(snapped, hi - 0.01), hi: value.hi});
+    else onChange({lo: value.lo, hi: snapped >= range[1] - span * 0.002 ? null : Math.max(snapped, lo + 0.01)});
+  };
+  const label = (z: number) => `${z.toFixed(2)} m`;
+  return (
+    <div className="height-slider" onPointerDown={e => e.stopPropagation()} onDoubleClick={() => onChange({lo: null, hi: null})} title="Hide points above and below. Double-click to reset.">
+      <span className="cap">{label(range[1])}</span>
+      <div className="track" ref={track}
+        onPointerMove={e => { if (drag) move(drag, zAt(e.clientY)); }}
+        onPointerUp={e => { setDrag(null); (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId); }}
+        onPointerCancel={() => setDrag(null)}>
+        <div className="band" style={{bottom: `${pct(lo)}%`, top: `${100 - pct(hi)}%`}} />
+        {(['hi', 'lo'] as const).map(which => (
+          <button key={which} className={`thumb ${which}`} style={{bottom: `${pct(which === 'lo' ? lo : hi)}%`}} aria-label={which === 'lo' ? 'Hide below' : 'Hide above'}
+            onPointerDown={e => { e.stopPropagation(); setDrag(which); (e.currentTarget.parentElement as HTMLElement).setPointerCapture?.(e.pointerId); }}>
+            <i>{label(which === 'lo' ? lo : hi)}</i>
+          </button>
+        ))}
+      </div>
+      <span className="cap">{label(range[0])}</span>
+    </div>
   );
 }
 
