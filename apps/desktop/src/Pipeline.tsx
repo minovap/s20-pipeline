@@ -7,6 +7,8 @@ import type {RunSize, StageState} from './types';
 import {bytes, count, duration} from './format';
 import {Spinner} from './ui';
 import {leftText, loadHistory, remainingFor, remainingTotal} from './timing';
+import {foldStages} from './fold';
+import type {Row} from './fold';
 
 export type PipelineProps = {
   stages: StageState[];            // ordered: every step this run will do
@@ -26,12 +28,25 @@ const formatProgress = (s: StageState) => {
   return s.phase ? `${s.phase}, ${value}` : value;
 };
 
-export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, memory, size, onShowLog}: PipelineProps) {
+export function Pipeline({stages: realStages, status, startedAt, finishedAt, error, cpu, memory, size, onShowLog}: PipelineProps) {
   const [now, setNow] = useState(Date.now());
   const history = useMemo(loadHistory, [status]);
   const live = status === 'running' || status === 'starting';
-  const left = (s: StageState) => (live && size ? remainingFor(s, size, history, now) : null);
-  const totalLeft = live && size ? remainingTotal(stages, size, history, now) : null;
+  // Small steps fold into the next real one for display; timing still uses the real stages.
+  const stages: Row[] = useMemo(() => foldStages(realStages), [realStages]);
+  const byId = useMemo(() => new Map(realStages.map(s => [s.id, s])), [realStages]);
+  const left = (row: Row) => {
+    if (!live || !size) return null;
+    let sum = 0;
+    for (const id of row.members) {
+      const member = byId.get(id);
+      const value = member ? remainingFor(member, size, history, now) : null;
+      if (value == null) return null;
+      sum += value;
+    }
+    return sum;
+  };
+  const totalLeft = live && size ? remainingTotal(realStages, size, history, now) : null;
   useEffect(() => {
     if (status !== 'running' && status !== 'starting') return;
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -77,7 +92,8 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
   async function toggleLog(stage: string) {
     if (openLog?.stage === stage) { setOpenLog(null); return; }
     if (!onShowLog) return;
-    try { setOpenLog({stage, text: await onShowLog(stage)}); } catch (e) { setOpenLog({stage, text: String(e)}); }
+    const source = stages.find(r => r.id === stage)?.logStage ?? stage;
+    try { setOpenLog({stage, text: await onShowLog(source)}); } catch (e) { setOpenLog({stage, text: String(e)}); }
   }
 
   // Group boundaries so the connector line breaks between sections.
@@ -131,7 +147,7 @@ export function Pipeline({stages, status, startedAt, finishedAt, error, cpu, mem
                    s.status === 'skipped' ? <Minus size={12} /> : null}
                 </span>
                 <span className="name">{stageLabel(s.id)}
-                  {s.status === 'running' && s.total ? <small>{formatProgress(s)}</small> : null}
+                  {s.status === 'running' && (s.total ? <small>{formatProgress(s)}</small> : s.note ? <small>{s.note}</small> : null)}
                 </span>
                 <span className="times">
                   <time>{time}</time>

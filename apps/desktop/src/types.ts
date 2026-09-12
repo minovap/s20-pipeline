@@ -92,11 +92,11 @@ export const STAGES: {id: string; label: string; group: 'Prepare' | 'Geometry' |
   {id: 'photos', label: 'Extract photos', group: 'Color', about: 'Pulls the camera photos out of the recording as JPEG files.'},
   {id: 'masks', label: 'Mask people', group: 'Color', about: 'Finds people in the photos so they do not leave their colors on the cloud.'},
   {id: 'cameras', label: 'Calibrate cameras', group: 'Color', about: 'Works out where each photo was taken by matching its timestamp to the scanner path and the camera calibration.'},
-  {id: 'candidates', label: 'Match photos to points', group: 'Color', about: 'For every point, picks the photos that actually see it, taking into account what is hidden behind other surfaces. Usually the longest step.'},
+  {id: 'candidates', label: 'Match photos to points', group: 'Color', about: 'First works out where each photo was taken from the scanner path, then for every point picks the photos that actually see it, taking into account what is hidden behind other surfaces. Usually the longest step.'},
   {id: 'global', label: 'Balance exposure between photos', group: 'Color', about: 'Evens out brightness differences between photos so seams do not show where they meet.'},
   {id: 'local', label: 'Balance exposure within photos', group: 'Color', about: 'Evens out lighting differences inside each photo, such as sun and shade, before blending.'},
   {id: 'blend', label: 'Blend colors', group: 'Color', about: 'Combines the chosen photos into one color for every point.'},
-  {id: 'export', label: 'Write point cloud', group: 'Color', about: 'Writes the finished colored point cloud as a LAS file in the run folder.'},
+  {id: 'export', label: 'Blend colors and write point cloud', group: 'Color', about: 'Evens out lighting between and within photos, combines the chosen photos into one color per point, and writes the finished point cloud as a LAS file in the run folder.'},
 ];
 export const stageLabel = (id: string) => STAGES.find(s => s.id === id)?.label ?? id;
 

@@ -94,3 +94,26 @@ test('time remaining comes from the recent rate, then from history', async () =>
   assert.equal(leftText(750), 'about 13 min left');
   assert.equal(leftText(4800), 'about 1 h 20 min left');
 });
+
+
+test('small steps fold into the next real step for display', async () => {
+  const {foldStages} = await import('../src/fold.ts');
+  const st = (id, status, extra = {}) => ({id, status, ...extra});
+  const rows = foldStages([st('geometry', 'complete', {wall_s: 20}), st('photos', 'complete', {wall_s: 5}), st('masks', 'complete', {wall_s: 8}),
+    st('cameras', 'running', {startedAt: 1000}), st('candidates', 'pending'), st('global', 'pending'), st('local', 'pending'), st('blend', 'pending'), st('export', 'pending')]);
+  assert.deepEqual(rows.map(r => r.id), ['geometry', 'photos', 'masks', 'candidates', 'export']);
+  const match = rows[3];
+  assert.equal(match.status, 'running'); assert.equal(match.note, 'calibrating cameras'); assert.equal(match.startedAt, 1000); assert.equal(match.logStage, 'cameras');
+  assert.deepEqual(rows[4].members, ['global', 'local', 'blend', 'export']);
+  // once the host runs, its own progress shows
+  const running = foldStages([st('cameras', 'complete', {wall_s: 1}), st('candidates', 'running', {done: 3, total: 10, startedAt: 2000})]);
+  assert.equal(running[0].done, 3); assert.equal(running[0].note, undefined); assert.equal(running[0].startedAt, 2000);
+  // completed rows sum the hidden walls
+  const done = foldStages([st('global', 'complete', {wall_s: 1}), st('local', 'complete', {wall_s: 2}), st('blend', 'complete', {wall_s: 1}), st('export', 'complete', {wall_s: 4})]);
+  assert.equal(done[0].wall_s, 8);
+  // a failed hidden step surfaces on the host row with its own log
+  const failed = foldStages([st('global', 'failed'), st('local', 'pending'), st('blend', 'pending'), st('export', 'pending')]);
+  assert.equal(failed[0].status, 'failed'); assert.equal(failed[0].logStage, 'global');
+  // geometry-only runs have no host for the color steps; nothing is lost
+  assert.deepEqual(foldStages([st('decode', 'complete'), st('geometry', 'pending')]).map(r => r.id), ['decode', 'geometry']);
+});
