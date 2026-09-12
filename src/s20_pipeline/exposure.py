@@ -7,6 +7,55 @@ from scipy import sparse
 from scipy.sparse.linalg import spsolve
 
 
+def normal_matrix(edges, w, nodes):
+    """A.T diag(w) A for difference equations x[i] - x[j], assembled directly from the edge list."""
+    i, j = edges[:, 0], edges[:, 1]
+    rows = np.concatenate([i, j, i, j])
+    cols = np.concatenate([i, j, j, i])
+    data = np.concatenate([w, w, -w, -w])
+    return sparse.coo_matrix((data, (rows, cols)), shape=(nodes, nodes)).tocsr()
+
+
+def solve_channel(args):
+    """Iteratively reweighted least squares for one colour channel. Returns (correction, median residual)."""
+    edges, y, base, reg, prior, local, nodes = args
+    i, j = edges[:, 0], edges[:, 1]
+    w = base.copy()
+    correction = prior.copy()
+    residual = np.zeros(0)
+    for _iteration in range(4):
+        wy = w * y
+        # bincount returns integers when there are no equations; keep float64 either way.
+        rhs = (np.bincount(i, wy, nodes) - np.bincount(j, wy, nodes)).astype(np.float64)
+        if local:
+            rhs += 8 * prior
+        correction = spsolve(normal_matrix(edges, w, nodes) + reg, rhs)
+        residual = correction[i] - correction[j] - y
+        w = base * np.minimum(1, 8 / np.maximum(abs(residual), 1e-05))
+    return correction, (float(np.median(abs(residual))) if len(residual) else None)
+
+
+class _Serial:
+    def map(self, fn, items):
+        return [fn(x) for x in items]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def fork_pool(workers):
+    """Forked worker pool so the large edge arrays are shared copy-on-write; serial where fork is unavailable."""
+    import multiprocessing
+
+    try:
+        return multiprocessing.get_context("fork").Pool(workers)
+    except (ValueError, OSError):
+        return _Serial()
+
+
 class Exposure:
     k = 4
     gw = 8
@@ -91,46 +140,31 @@ class Exposure:
         y = np.concatenate(observations)
         base = np.concatenate(weights)
         count = len(y)
-        ri = np.repeat(np.arange(count), 2)
-        A = sparse.coo_matrix(
-            (np.tile([1.0, -1.0], count), (ri, edges.ravel())), shape=(count, nodes)
-        ).tocsr()
-        reg = sparse.eye(nodes, format="csr") * 0.15
         prior = np.zeros((nodes, 3))
         if mode == "local":
             global_field = np.load(self.output / "global/field.npy")
             prior = global_field.reshape(nodes, 3)
-            pairs = []
-            for im in range(self.image_count):
-                for yy in range(self.gh):
-                    for xx in range(self.gw):
-                        n = im * self.gw * self.gh + yy * self.gw + xx
-                        if xx + 1 < self.gw:
-                            pairs.append((n, n + 1))
-                        if yy + 1 < self.gh:
-                            pairs.append((n, n + self.gw))
-            pairs = np.array(pairs)
-            D = sparse.coo_matrix(
-                (
-                    np.tile([1.0, -1.0], len(pairs)),
-                    (np.repeat(np.arange(len(pairs)), 2), pairs.ravel()),
-                ),
-                shape=(len(pairs), nodes),
-            ).tocsr()
-            reg = sparse.eye(nodes, format="csr") * 8 + D.T @ D * 80
-        correction = prior.copy()
-        errors = []
-        for channel in range(3):
-            w = base.copy()
-            for iteration in range(4):
-                W = A.multiply(w[:, None])
-                rhs = A.T @ (w * y[:, channel])
-                if mode == "local":
-                    rhs += 8 * prior[:, channel]
-                correction[:, channel] = spsolve(A.T @ W + reg, rhs)
-                residual = A @ correction[:, channel] - y[:, channel]
-                w = base * np.minimum(1, 8 / np.maximum(abs(residual), 1e-05))
-            errors.append(float(np.median(abs(residual))) if len(residual) else None)
+            # Smoothness between neighbouring cells of the same image.
+            cell = np.arange(nodes).reshape(self.image_count, self.gh, self.gw)
+            right = np.column_stack([cell[:, :, :-1].ravel(), cell[:, :, 1:].ravel()])
+            down = np.column_stack([cell[:, :-1, :].ravel(), cell[:, 1:, :].ravel()])
+            pairs = np.concatenate([right, down])
+            reg = sparse.eye(nodes, format="csr") * 8 + normal_matrix(
+                pairs, np.full(len(pairs), 80.0), nodes
+            )
+        else:
+            reg = sparse.eye(nodes, format="csr") * 0.15
+        # Each channel is an independent robust fit; run them side by side.
+        with fork_pool(3) as pool:
+            solved = pool.map(
+                solve_channel,
+                [
+                    (edges, y[:, channel], base, reg, prior[:, channel], mode == "local", nodes)
+                    for channel in range(3)
+                ],
+            )
+        correction = np.column_stack([s[0] for s in solved])
+        errors = [s[1] for s in solved]
         correction = np.clip(correction, -32, 32).astype("float32")
         if mode == "global":
             field = np.broadcast_to(
@@ -154,6 +188,7 @@ class Exposure:
             "heldout_after_channel_median": float(np.median(after)) if len(aa) else None,
             "heldout_before_channel_p95": float(np.percentile(before, 95)) if len(aa) else None,
             "heldout_after_channel_p95": float(np.percentile(after, 95)) if len(aa) else None,
+            "channel_median_residual": errors,
             "offset_min": float(field.min()),
             "offset_max": float(field.max()),
             "method": "Robust additive RGB offsets from same-point overlapping views; low-gradient/non-saturated guards; zero prior for global, global prior and neighbor smoothness for local; ±32 channel clamp. Local nearest-cell fit with bilinear application. Heldout split by point, not image pair. No Studio colors used.",
