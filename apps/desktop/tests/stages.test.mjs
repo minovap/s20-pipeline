@@ -126,3 +126,30 @@ test('default point share grows with the cloud but stays bounded', async () => {
   assert.equal(defaultBudget(122000000), 12200000); // 10 % of a big cloud
   assert.equal(defaultBudget(900000000), PREVIEW_MAX);
 });
+
+
+test('outline shapes: garden area, placement, perimeter band and masks', async () => {
+  const {LYCKAN_8, area, centred, rectangle, parseVertices, worldPolygon, insidePolygon, distanceToEdges, offsetPolygon} = await import('../src/viewer/shape.ts');
+  const {effectiveRegion, unionMask} = await import('../src/viewer/slices.ts');
+  assert(Math.abs(area(LYCKAN_8) - 2352) < 2);
+  assert(Math.abs(area(rectangle(2358, 1.5)) - 2358) < 1e-6);
+  assert.deepEqual(parseVertices('0 0\n10 0\n10 10\n# note\n0 10'), [[0, 0], [10, 0], [10, 10], [0, 10]]);
+  assert.equal(parseVertices('0 0\n1 1'), null);
+  const shape = {vertices: centred([[0, 0], [10, 0], [10, 10], [0, 10]]), position: [100, 50], rotation: 90};
+  const poly = worldPolygon(shape);
+  assert(insidePolygon(100, 50, poly) && !insidePolygon(106, 50, poly));
+  assert(Math.abs(distanceToEdges(107, 50, poly) - 2) < 1e-9);
+  const grown = offsetPolygon(poly, 1);
+  assert(Math.abs(area(grown) - 144) < 0.5);
+  const all = [
+    {id: 'g', name: 'Garden', source: 's', parent: null, box: [[90, 40, 0], [110, 60, 5]], created: 0, shape},
+    {id: 'p', name: 'Garden perimeter', source: 's', parent: 'g', box: [[88, 38, 0], [112, 62, 5]], created: 0, ring: {expand: 2}},
+  ];
+  const inside = effectiveRegion(all[0], all), ring = effectiveRegion(all[1], all);
+  assert.equal(inside.tests.length, 1); assert.equal(ring.tests.length, 1); assert.equal(ring.tests[0].mode, 'ring');
+  // points: centre (inside), 1 m outside the east edge (ring), 5 m outside (neither)
+  const data = new Float32Array([100, 50, 1, 106, 50, 1, 110, 50, 1]);
+  assert.deepEqual([...unionMask(data, [0, 0, 0], [inside])], [1, 0, 0]);
+  assert.deepEqual([...unionMask(data, [0, 0, 0], [ring])], [0, 1, 0]);
+  assert.deepEqual([...unionMask(data, [0, 0, 0], [inside, ring])], [1, 1, 0]);
+});

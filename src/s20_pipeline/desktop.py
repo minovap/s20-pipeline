@@ -171,8 +171,60 @@ def _chunks(source):
     raise ValueError("Slice export supports uncompressed LAS or binary PLY sources")
 
 
+def _inside_polygon(x, y, vertices):
+    """Even-odd point-in-polygon for arrays x, y."""
+    inside = np.zeros(len(x), dtype=bool)
+    n = len(vertices)
+    for i in range(n):
+        xi, yi = vertices[i]
+        xj, yj = vertices[i - 1]
+        crosses = (yi > y) != (yj > y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            at = (xj - xi) * (y - yi) / (yj - yi) + xi
+        inside ^= crosses & (x < at)
+    return inside
+
+
+def _distance_to_edges(x, y, vertices):
+    best = np.full(len(x), np.inf)
+    n = len(vertices)
+    for i in range(n):
+        ax, ay = vertices[i - 1]
+        bx, by = vertices[i]
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        t = np.clip(((x - ax) * dx + (y - ay) * dy) / l2, 0, 1) if l2 else np.zeros(len(x))
+        ex, ey = ax + t * dx - x, ay + t * dy - y
+        best = np.minimum(best, ex * ex + ey * ey)
+    return np.sqrt(best)
+
+
+def _region_mask(xyz, region):
+    """Points inside a region: its box and every polygon test (inside, or a perimeter ring)."""
+    low, high = np.asarray(region["box"], dtype="<f8")
+    mask = np.all((xyz >= low) & (xyz <= high), axis=1)
+    for test in region.get("polygons", []):
+        vertices = np.asarray(test["vertices"], dtype="<f8")
+        if vertices.ndim != 2 or vertices.shape[1] != 2 or len(vertices) < 3:
+            raise ValueError("Polygon needs at least three x y vertices")
+        ids = np.flatnonzero(mask)
+        if not len(ids):
+            break
+        x, y = xyz[ids, 0], xyz[ids, 1]
+        inside = _inside_polygon(x, y, vertices)
+        if test.get("mode") == "ring":
+            keep = ~inside & (_distance_to_edges(x, y, vertices) <= float(test.get("expand", 0)))
+        else:
+            keep = inside
+        mask[ids[~keep]] = False
+    return mask
+
+
 def export_slices(spec):
     """Write points inside the union of boxes per source to one LAS file.
+
+    Each source has "boxes" and/or "regions" ({"box": ..., "polygons": [{"vertices": [[x, y], ...],
+    "mode": "inside" | "ring", "expand": metres}]}); a point is kept when it satisfies any of them.
 
     spec = {"output": path, "sources": [{"path": str, "boxes": [[[minx,miny,minz],[maxx,maxy,maxz]], ...],
             "transform": {"rotation": [9 row-major], "origin": [3], "translation": [3]} | None}]}
@@ -192,9 +244,14 @@ def export_slices(spec):
     total = 0
     for item in spec["sources"]:
         source = Path(item["path"]).resolve(strict=True)
-        boxes = np.asarray(item["boxes"], dtype="<f8")
-        if boxes.ndim != 3 or boxes.shape[1:] != (2, 3) or not np.isfinite(boxes).all():
-            raise ValueError("Boxes must be [[min xyz],[max xyz]] triples")
+        regions = [{"box": b} for b in item.get("boxes", [])] + list(item.get("regions", []))
+        if not regions:
+            raise ValueError("Nothing selected for export")
+        for region in regions:
+            box = np.asarray(region["box"], dtype="<f8")
+            if box.shape != (2, 3) or not np.isfinite(box).all():
+                raise ValueError("Boxes must be [[min xyz],[max xyz]] triples")
+        boxes = regions
         n, info, gen = _chunks(source)
         transform = item.get("transform")
         if transform:
@@ -229,8 +286,8 @@ def export_slices(spec):
                     rotation, origin, shift = transform
                     xyz = (xyz - origin) @ rotation.T + shift
                 mask = np.zeros(len(xyz), dtype=bool)
-                for low, high in boxes:
-                    mask |= np.all((xyz >= low) & (xyz <= high), axis=1)
+                for region in boxes:
+                    mask |= _region_mask(xyz, region)
                 ids = np.flatnonzero(mask)
                 if len(ids):
                     records = laspy.ScaleAwarePointRecord.zeros(len(ids), header=header)

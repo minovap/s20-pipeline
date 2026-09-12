@@ -31,6 +31,7 @@ export class CloudRenderer {
   private controls: OrbitControls;
   private entries = new Map<string, Entry>();
   private outline: THREE.LineSegments | null = null;
+  private polygons: THREE.LineSegments[] = [];
   private grid: THREE.GridHelper | null = null;
   private observer: ResizeObserver;
   worldOrigin: THREE.Vector3 | null = null;
@@ -48,6 +49,7 @@ export class CloudRenderer {
     this.persp.up.set(0, 0, 1);
     this.ortho.up.set(0, 0, 1);
     this.controls = this.makeControls(this.persp);
+    this.canvas.addEventListener('wheel', this.flyThrough, {capture: true, passive: false});
     this.observer = new ResizeObserver(() => this.resize());
     this.observer.observe(host);
     this.resize();
@@ -62,9 +64,34 @@ export class CloudRenderer {
     c.enableDamping = false;
     c.screenSpacePanning = true;
     c.zoomToCursor = true;
+    // Never let the orbit centre become a wall: below this distance a wheel
+    // tick flies the camera forward instead (see flyThrough).
+    c.minDistance = 0.25;
     c.addEventListener('change', () => this.draw());
     return c;
   }
+
+  /**
+   * In perspective the orbit target limits how close the camera can get, and
+   * once there every wheel tick shrinks an already tiny distance, which also
+   * makes zooming back out slow. At the limit, move camera and target along
+   * the cursor ray so the view keeps travelling into the scene.
+   */
+  private flyThrough = (event: WheelEvent) => {
+    if (this.mode !== 'persp' || event.deltaY >= 0 || !this.controls.enabled) return;
+    const distance = this.persp.position.distanceTo(this.controls.target);
+    if (distance > this.controls.minDistance * 1.5) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+    const ray = new THREE.Vector3(ndc.x, ndc.y, 0.5).unproject(this.persp).sub(this.persp.position).normalize();
+    const step = 0.4 + 0.2 * distance;
+    this.persp.position.addScaledVector(ray, step);
+    this.controls.target.addScaledVector(ray, step);
+    this.controls.update();
+    this.draw();
+    event.preventDefault();
+    event.stopPropagation();
+  };
 
   setPointSize(n: number) {
     this.pointSize = n;
@@ -213,6 +240,30 @@ export class CloudRenderer {
     this.scene.add(this.grid);
   }
 
+  /** Outline polygons (world XY, a z range) drawn as a top and bottom loop with corner posts. */
+  setPolygons(polys: {points: [number, number][]; z: [number, number]; strong: boolean}[]) {
+    for (const line of this.polygons) { this.scene.remove(line); line.geometry.dispose(); (line.material as THREE.Material).dispose(); }
+    this.polygons = [];
+    const o = this.worldOrigin;
+    if (!o) { this.draw(); return; }
+    for (const poly of polys) {
+      const pts: number[] = [];
+      const n = poly.points.length;
+      for (let i = 0; i < n; i++) {
+        const [ax, ay] = poly.points[i], [bx, by] = poly.points[(i + 1) % n];
+        for (const z of poly.z) pts.push(ax - o.x, ay - o.y, z - o.z, bx - o.x, by - o.y, z - o.z);
+        pts.push(ax - o.x, ay - o.y, poly.z[0] - o.z, ax - o.x, ay - o.y, poly.z[1] - o.z);
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
+      const material = new THREE.LineBasicMaterial({color: poly.strong ? 0xd8c27a : 0x9fc59b, transparent: true, opacity: poly.strong ? 0.95 : 0.6});
+      const line = new THREE.LineSegments(geometry, material);
+      this.scene.add(line);
+      this.polygons.push(line);
+    }
+    this.draw();
+  }
+
   setView(mode: ViewMode, flipped = false) {
     const previousTarget = this.controls.target.clone();
     const previousDistance = this.controls.object.position.distanceTo(previousTarget);
@@ -341,6 +392,8 @@ export class CloudRenderer {
   }
 
   dispose() {
+    this.canvas.removeEventListener('wheel', this.flyThrough, {capture: true} as EventListenerOptions);
+    this.setPolygons([]);
     if (this.grid) { this.scene.remove(this.grid); this.grid.geometry.dispose(); (this.grid.material as THREE.Material).dispose(); }
     cancelAnimationFrame(this.raf);
     this.observer.disconnect();

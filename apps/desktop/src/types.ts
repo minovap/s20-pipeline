@@ -56,7 +56,15 @@ export type Run = {
 };
 
 export type Box = [[number, number, number], [number, number, number]];
-export type Slice = {id: string; name: string; source: string; parent: string | null; box: Box; created: number};
+/** A fixed outline placed over the cloud. Vertices are metres about the shape's centre. */
+export type Shape = {vertices: [number, number][]; position: [number, number]; rotation: number};
+export type Slice = {
+  id: string; name: string; source: string; parent: string | null; box: Box; created: number;
+  /** Outline slice: points inside the polygon (within the box's z range). */
+  shape?: Shape;
+  /** Perimeter band: points outside the parent's outline within this many metres of it. */
+  ring?: {expand: number};
+};
 export type ImportedCloud = {path: string; name: string; added: number};
 /** Rotation in degrees (roll about X, pitch about Y, yaw about Z; applied yaw·pitch·roll) about the cloud's preview origin, then a shift in metres. */
 export type Orientation = {rotation: [number, number, number]; translation: [number, number, number]};

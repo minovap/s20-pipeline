@@ -249,6 +249,8 @@ pre.log { margin: 0 16px 8px 48px; padding: 10px 12px; background: var(--bg); bo
 .slicebar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; background: rgba(34, 38, 42, 0.94); border: 1px solid var(--line); border-radius: 8px; backdrop-filter: blur(8px); }
 .slicebar span { color: var(--amber); font-size: 12px; }
 .slicebar.calibrate span { color: var(--text); }
+.slicebar.outline-hint span { color: var(--muted); }
+.modal textarea { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--text); resize: vertical; }
 .pad.small { font-size: 12px; line-height: 1.5; padding-top: 4px; }
 .orientation { border-top: 0; }
 .rotate { position: absolute; left: 16px; bottom: 44px; display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; background: rgba(34, 38, 42, 0.92); border: 1px solid var(--line); border-radius: 8px; backdrop-filter: blur(8px); }

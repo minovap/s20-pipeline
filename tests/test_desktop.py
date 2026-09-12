@@ -111,3 +111,48 @@ def test_export_slices_applies_orientation_transform(tmp_path):
     out = laspy.read(spec["output"])
     assert result["points"] == 1
     assert np.allclose([out.x[0], out.y[0], out.z[0]], [10, 10, 0.5], atol=1e-3)
+
+
+def test_export_polygon_regions_inside_and_perimeter(tmp_path):
+    from s20_pipeline.desktop import export_slices
+
+    source = tmp_path / "grid.las"
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scales = np.full(3, 0.01)
+    data = laspy.LasData(header)
+    xs, ys = np.meshgrid(np.arange(0, 20, 1.0), np.arange(0, 20, 1.0))
+    data.x = xs.ravel()
+    data.y = ys.ravel()
+    data.z = np.zeros(xs.size)
+    data.red = data.green = data.blue = np.zeros(xs.size, dtype="u2")
+    data.write(source)
+    square = [[4.5, 4.5], [10.5, 4.5], [10.5, 10.5], [4.5, 10.5]]  # 36 grid points inside (5..10)
+    inside = {
+        "box": [[0, 0, -1], [20, 20, 1]],
+        "polygons": [{"vertices": square, "mode": "inside"}],
+    }
+    ring = {
+        "box": [[0, 0, -1], [20, 20, 1]],
+        "polygons": [{"vertices": square, "mode": "ring", "expand": 1.0}],
+    }
+    a = export_slices(
+        {
+            "output": str(tmp_path / "inside.las"),
+            "sources": [{"path": str(source), "regions": [inside]}],
+        }
+    )
+    b = export_slices(
+        {
+            "output": str(tmp_path / "ring.las"),
+            "sources": [{"path": str(source), "regions": [ring]}],
+        }
+    )
+    both = export_slices(
+        {
+            "output": str(tmp_path / "both.las"),
+            "sources": [{"path": str(source), "regions": [inside, ring]}],
+        }
+    )
+    assert a["points"] == 36
+    assert b["points"] == 28  # one-cell band around the 6x6 block, corners at 0.71 m included
+    assert both["points"] == 64

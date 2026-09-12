@@ -1,15 +1,17 @@
 // Full-window point cloud viewer with axis-locked views, box slices and export.
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {ChevronLeft, Columns2, Compass, Crop, FlipHorizontal2, Maximize, PanelRightClose, PanelRightOpen} from 'lucide-react';
+import {ChevronLeft, Columns2, Compass, Crop, FlipHorizontal2, Maximize, PanelRightClose, PanelRightOpen, Pentagon} from 'lucide-react';
 import * as THREE from 'three';
 import {IDENTITY, isIdentity, levelGround, rotateAboutAxis, transformFor} from './orient';
 import {api, errorText, listen} from '../api';
 import {basename, bytes, count, when} from '../format';
 import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, useContextMenu} from '../ui';
-import type {Box, Cloud, ExportEvent, Orientation, Project, Slice} from '../types';
+import type {Box, Cloud, ExportEvent, Orientation, Project, Shape, Slice} from '../types';
 import {PREVIEW_MAX, defaultBudget} from '../types';
 import {CloudRenderer, DEPTH_AXIS, type ViewMode} from './render';
-import {children, countMask, descendants, effectiveBox, intersect, newId, nextSliceName, normalize, unionMask} from './slices';
+import {children, countMask, descendants, effectiveBox, effectiveRegion, intersect, newId, nextSliceName, normalize, unionMask} from './slices';
+import {LYCKAN_8, area as polygonArea, centred, formatVertices, offsetPolygon, parseVertices, rectangle, shapeBox, shapeOf, worldPolygon} from './shape';
+import type {XY} from './shape';
 
 type Source = {path: string; name: string; detail: string; kind: 'result' | 'export' | 'import'};
 type V3 = [number, number, number];
@@ -35,13 +37,16 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const [panel, setPanel] = useState(true);
   const [scale, setScale] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  /** An outline being dragged: its slice and the position it has right now. */
+  const [dragShape, setDragShape] = useState<{id: string; position: [number, number]} | null>(null);
+  const shapeDrag = useRef<{id: string; startPosition: [number, number]; origin: V3} | null>(null);
   /** Calibration mode edits one cloud's orientation locally until Save. */
   const [calibrating, setCalibrating] = useState<{source: string; before: Orientation; current: Orientation; checkedBefore: Set<string>; modeBefore: ViewMode} | null>(null);
   const drag = useRef<{handle: Handle; start: Draft; origin: V3} | null>(null);
   const [viewTick, setViewTick] = useState(0);
   const [dialog, setDialog] = useState<React.ReactNode>(null);
   const [exporting, setExporting] = useState<{name: string; done: number; total: number} | null>(null);
-  type ExportJob = {name: string; sources: {path: string; boxes: Box[]; transform?: ReturnType<typeof transformFor>}[]};
+  type ExportJob = {name: string; sources: {path: string; regions?: ExportRegion[]; boxes?: Box[]; transform?: ReturnType<typeof transformFor>}[]};
   const [queue, setQueue] = useState<ExportJob[]>([]);
   const [toast, setToast] = useState('');
   const {openMenu, menu} = useContextMenu();
@@ -63,7 +68,8 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     for (const c of project.clouds) list.push({path: c.path, name: c.name, detail: 'Imported', kind: 'import'});
     return list;
   }, [project]);
-  const slices = project?.slices ?? [];
+  const storedSlices = project?.slices ?? [];
+  const slices = useMemo(() => (dragShape ? withShapeBoxes(storedSlices.map(s => (s.id === dragShape.id && s.shape ? {...s, shape: {...s.shape, position: dragShape.position}} : s))) : storedSlices), [storedSlices, dragShape]);
   const orientations = useMemo<Record<string, Orientation>>(() => {
     const stored = project?.orientations ?? {};
     return calibrating ? {...stored, [calibrating.source]: calibrating.current} : stored;
@@ -143,23 +149,43 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (!r) return;
     for (const [source, cloud] of clouds) {
       if (checked.has(source)) { r.setMask(source, null); continue; }
-      const boxes = slices.filter(s => s.source === source && checked.has(s.id)).map(s => effectiveBox(s, slices)).filter((b): b is Box => !!b);
-      if (!boxes.length) { r.setMask(source, new Float32Array(cloud.positions.length / 3)); continue; }
-      r.setMask(source, unionMask(cloud.positions, cloud.info.origin, boxes, transformFor(orientations[source], cloud.info.origin)));
+      const regions = slices.filter(s => s.source === source && checked.has(s.id)).map(s => effectiveRegion(s, slices)).filter((b): b is NonNullable<typeof b> => !!b);
+      if (!regions.length) { r.setMask(source, new Float32Array(cloud.positions.length / 3)); continue; }
+      r.setMask(source, unionMask(cloud.positions, cloud.info.origin, regions, transformFor(orientations[source], cloud.info.origin)));
     }
     // Frame the first thing that becomes visible, after its mask is in place.
     if (firstFrame.current && clouds.size) { firstFrame.current = false; r.frameVisible(); }
   }, [checked, slices, clouds, orientations]);
 
   const selectedSlice = slices.find(s => s.id === selected) ?? null;
-  useEffect(() => { renderer.current?.setOutline(selectedSlice ? effectiveBox(selectedSlice, slices) : null); }, [selectedSlice, slices]);
+  const selectedShape = selectedSlice ? shapeOf(selectedSlice, slices) : null;
+  /** The outline slice a drag or rotation acts on: the selected outline, or the parent of a selected band. */
+  const movableOutline = selectedSlice ? (selectedSlice.shape ? selectedSlice : selectedSlice.ring ? slices.find(s => s.id === selectedSlice.parent) ?? null : null) : null;
+  const canMoveOutline = !!movableOutline?.shape && mode === 'top' && !slicing && !calibrating;
+
+  useEffect(() => {
+    const r = renderer.current;
+    if (!r) return;
+    const box = selectedSlice ? effectiveBox(selectedSlice, slices) : null;
+    if (selectedSlice && selectedShape && box) {
+      const z: [number, number] = [box[0][2], box[1][2]];
+      const base = worldPolygon(selectedShape);
+      const polys = [{points: base, z, strong: !selectedSlice.ring}];
+      if (selectedSlice.ring) polys.push({points: offsetPolygon(base, selectedSlice.ring.expand), z, strong: true});
+      r.setOutline(null);
+      r.setPolygons(polys);
+    } else {
+      r.setPolygons([]);
+      r.setOutline(box);
+    }
+  }, [selectedSlice, selectedShape, slices]);
 
   const sliceCounts = useMemo(() => {
     const out = new Map<string, number>();
     for (const s of slices) {
       const cloud = clouds.get(s.source);
-      const box = effectiveBox(s, slices);
-      if (cloud && box) out.set(s.id, countMask(unionMask(cloud.positions, cloud.info.origin, [box], transformFor(orientations[s.source], cloud.info.origin))));
+      const region = effectiveRegion(s, slices);
+      if (cloud && region) out.set(s.id, countMask(unionMask(cloud.positions, cloud.info.origin, [region], transformFor(orientations[s.source], cloud.info.origin))));
     }
     return out;
   }, [slices, clouds, orientations]);
@@ -212,8 +238,15 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     return rend.project(new THREE.Vector3(p[0] - rend.worldOrigin.x, p[1] - rend.worldOrigin.y, p[2] - rend.worldOrigin.z));
   }
   function onPointerDown(e: React.PointerEvent) {
-    if (!drawing || e.button !== 0) return;
     const target = e.target as HTMLElement;
+    if (canMoveOutline && e.button === 0 && target.tagName === 'CANVAS' && movableOutline?.shape) {
+      const ptr = pointerWorld(e);
+      if (!ptr) return;
+      shapeDrag.current = {id: movableOutline.id, startPosition: movableOutline.shape.position, origin: ptr};
+      try { host.current?.setPointerCapture(e.pointerId); } catch { /* optional */ }
+      return;
+    }
+    if (!drawing || e.button !== 0) return;
     if (target.tagName !== 'CANVAS' && !target.dataset.handle) return;
     const ptr = pointerWorld(e);
     if (!ptr) return;
@@ -223,6 +256,12 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     try { host.current?.setPointerCapture(e.pointerId); } catch { /* capture is a convenience only */ }
   }
   function onPointerMove(e: React.PointerEvent) {
+    const moving = shapeDrag.current;
+    if (moving) {
+      const ptr = pointerWorld(e);
+      if (ptr) setDragShape({id: moving.id, position: [moving.startPosition[0] + ptr[0] - moving.origin[0], moving.startPosition[1] + ptr[1] - moving.origin[1]]});
+      return;
+    }
     const d = drag.current;
     if (!d || !renderer.current) return;
     const ptr = pointerWorld(e);
@@ -240,6 +279,16 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     setDraft({p1, p2});
   }
   function onPointerUp(e: React.PointerEvent) {
+    if (shapeDrag.current) {
+      const moving = shapeDrag.current;
+      shapeDrag.current = null;
+      try { if (host.current?.hasPointerCapture(e.pointerId)) host.current.releasePointerCapture(e.pointerId); } catch { /* released */ }
+      const slice = storedSlices.find(s => s.id === moving.id);
+      const position = dragShape?.position;
+      setDragShape(null);
+      if (slice?.shape && position) updateShape(slice, {...slice.shape, position});
+      return;
+    }
     if (!drag.current) return;
     drag.current = null;
     try { if (host.current?.hasPointerCapture(e.pointerId)) host.current.releasePointerCapture(e.pointerId); } catch { /* already released */ }
@@ -278,6 +327,11 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   }
   /** Turn the target cloud about the axis the camera looks along; clockwise on screen is positive. */
   function rotateView(degrees: number) {
+    if (movableOutline?.shape && !slicing && !calibrating) {
+      // Clockwise on screen in the top view is a negative turn of the outline.
+      updateShape(movableOutline, {...movableOutline.shape, rotation: Math.round((movableOutline.shape.rotation - degrees) * 100) / 100});
+      return;
+    }
     const rend = renderer.current;
     const source = sliceTarget?.source;
     if (!rend || !source) return;
@@ -313,11 +367,55 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       onSubmit={name => { setDialog(null); enqueue([{name, sources: [{path: source, boxes: [box], transform: transformFor(current, cloud.info.origin)}]}]); endCalibration(false); }} />);
   }
   const rotationLabel = (() => {
+    if (movableOutline?.shape && !slicing && !calibrating) return {name: movableOutline.name, value: movableOutline.shape.rotation};
     const o = sliceTarget ? orientations[sliceTarget.source] ?? IDENTITY : IDENTITY;
     if (mode === 'top') return {name: 'Yaw', value: o.rotation[2]};
     if (mode === 'front') return {name: 'Pitch', value: o.rotation[1]};
     return {name: 'Roll', value: o.rotation[0]};
   })();
+
+  /** Recompute the boxes of outline slices and their perimeter bands from their shapes. */
+  function withShapeBoxes(list: Slice[]): Slice[] {
+    return list.map(s => {
+      if (s.shape) return {...s, box: shapeBox(s.shape, 'inside', 0, [s.box[0][2], s.box[1][2]])};
+      if (s.ring) { const shape = shapeOf(s, list); return shape ? {...s, box: shapeBox(shape, 'ring', s.ring.expand, [s.box[0][2], s.box[1][2]])} : s; }
+      return s;
+    });
+  }
+  function openOutlineDialog() {
+    if (!sliceTarget) { onError('Check a point cloud first.'); return; }
+    const parentBox = sliceTarget.parent ? effectiveBox(sliceTarget.parent, slices) : worldBoxOf(sliceTarget.source);
+    if (!parentBox) { onError('The point cloud is still loading.'); return; }
+    const target = sliceTarget;
+    setDialog(<OutlineDialog defaultName={nextSliceName(slices, target.parent)} onCancel={() => setDialog(null)}
+      onSubmit={(name, vertices, band) => {
+        setDialog(null);
+        const centre: [number, number] = [(parentBox[0][0] + parentBox[1][0]) / 2, (parentBox[0][1] + parentBox[1][1]) / 2];
+        const z: [number, number] = [parentBox[0][2], parentBox[1][2]];
+        const shape: Shape = {vertices: centred(vertices), position: centre, rotation: 0};
+        const outline: Slice = {id: newId(), name, source: target.source, parent: target.parent?.id ?? null, box: shapeBox(shape, 'inside', 0, z), created: Date.now() / 1000, shape};
+        const created = [outline];
+        if (band != null) created.push({id: newId(), name: `${name} perimeter`, source: target.source, parent: outline.id, box: shapeBox(shape, 'ring', band, z), created: Date.now() / 1000, ring: {expand: band}});
+        void saveSlices([...slices, ...created]);
+        setChecked(c => { const n = new Set(c); n.delete(target.parent ? target.parent.id : target.source); for (const x of created) n.add(x.id); return n; });
+        setSelected(outline.id);
+        if (mode === 'persp') setMode('top');
+      }} />);
+  }
+  function updateShape(slice: Slice, shape: Shape) {
+    void saveSlices(withShapeBoxes(slices.map(s => (s.id === slice.id ? {...s, shape} : s))));
+  }
+  function updateRing(slice: Slice, expand: number) {
+    void saveSlices(withShapeBoxes(slices.map(s => (s.id === slice.id ? {...s, ring: {expand}} : s))));
+  }
+  function addBand(slice: Slice) {
+    if (!slice.shape) return;
+    const z: [number, number] = [slice.box[0][2], slice.box[1][2]];
+    const band: Slice = {id: newId(), name: `${slice.name} perimeter`, source: slice.source, parent: slice.id, box: shapeBox(slice.shape, 'ring', 2, z), created: Date.now() / 1000, ring: {expand: 2}};
+    void saveSlices([...slices, band]);
+    setChecked(c => new Set(c).add(band.id));
+    setSelected(band.id);
+  }
 
   function deleteSlice(slice: Slice) {
     const kids = descendants(slice.id, slices);
@@ -340,16 +438,17 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
 
   // ---- export
   const exportNames = new Set((project?.exports ?? []).map(x => x.name.toLowerCase()));
-  function groupsFor(ids: string[]): {path: string; boxes: Box[]}[] | null {
-    const groups = new Map<string, Box[]>();
+  type ExportRegion = {box: Box; polygons: {vertices: XY[]; mode: 'inside' | 'ring'; expand: number}[]};
+  function groupsFor(ids: string[]): {path: string; regions: ExportRegion[]}[] | null {
+    const groups = new Map<string, ExportRegion[]>();
     for (const id of ids) {
       const slice = slices.find(s => s.id === id);
       const source = slice ? slice.source : id;
-      const box = slice ? effectiveBox(slice, slices) : worldBoxOf(id);
-      if (!box) { onError(`${slice?.name ?? basename(id)} is not loaded yet.`); return null; }
-      groups.set(source, [...(groups.get(source) ?? []), box]);
+      const region = slice ? effectiveRegion(slice, slices) : (() => { const b = worldBoxOf(id); return b ? {box: b, tests: []} : null; })();
+      if (!region) { onError(`${slice?.name ?? basename(id)} is not loaded yet.`); return null; }
+      groups.set(source, [...(groups.get(source) ?? []), {box: region.box, polygons: region.tests.map(t => ({vertices: t.vertices, mode: t.mode, expand: t.expand}))}]);
     }
-    return [...groups].map(([p, boxes]) => ({path: p, boxes, transform: transformFor(orientations[p], clouds.get(p)?.info.origin ?? [0, 0, 0])}));
+    return [...groups].map(([p, regions]) => ({path: p, regions, transform: transformFor(orientations[p], clouds.get(p)?.info.origin ?? [0, 0, 0])}));
   }
   const labelFor = (id: string) => slices.find(s => s.id === id)?.name ?? sources.find(s => s.path === id)?.name ?? basename(id);
   function startExport(ids: string[]) {
@@ -365,7 +464,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         setDialog(null);
         if (kind === 'composite') { const groups = groupsFor(ids); if (groups) enqueue([{name, sources: groups}]); }
         else {
-          const jobs = ids.map(id => { const groups = groupsFor([id]); return groups ? {name: labelFor(id), sources: groups} : null; }).filter((j): j is ExportJob => !!j);
+          const jobs = ids.map((id): ExportJob | null => { const groups = groupsFor([id]); return groups ? {name: labelFor(id), sources: groups} : null; }).filter((j): j is ExportJob => !!j);
           enqueue(jobs);
         }
       }} />);
@@ -422,6 +521,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         <Row id={s.id} depth={depth} name={s.name} detail={sliceCounts.has(s.id) ? `${count(sliceCounts.get(s.id))} shown` : ''} checked={checked.has(s.id)} selected={selected === s.id} onToggle={() => toggle(s.id)} onSelect={() => setSelected(s.id)}
           onMenu={e => openMenu(e, [
             {label: 'Slice from here', onClick: () => { setSelected(s.id); startSlicing(); }},
+            ...(s.shape && !children(s.id, slices).some(c => c.ring) ? [{label: 'Add perimeter band', onClick: () => addBand(s)}] : []),
             {label: 'Export…', onClick: () => startExport([s.id])},
             {label: 'Rename', onClick: () => renameSlice(s)},
             {separator: true, label: ''},
@@ -438,7 +538,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
       <div className={'canvas-host' + (drawing ? ' drawing' : '')} ref={host} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
         <canvas ref={canvas} />
         {drawing && draft && <Rubber a={toScreen(draft.p1)} b={toScreen(draft.p2)} key={viewTick} />}
-        {mode !== 'persp' && sliceTarget && (slicing || calibrating) && (
+        {mode !== 'persp' && sliceTarget && (slicing || calibrating || canMoveOutline) && (
           <div className="rotate" onPointerDown={e => e.stopPropagation()}>
             <span className="angle"><b>{rotationLabel.name}</b> {rotationLabel.value.toFixed(1)}°</span>
             <span className="buttons">
@@ -454,6 +554,11 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
             <button onClick={() => endCalibration(false)}>Cancel</button>
             <button onClick={saveCalibrationAs}>Save as…</button>
             <button className="primary" onClick={() => endCalibration(true)}>Save</button>
+          </div>
+        )}
+        {canMoveOutline && !drawing && (
+          <div className="slicebar outline-hint" onPointerDown={e => e.stopPropagation()}>
+            <span>Drag {movableOutline!.name} to move it; turn it with the buttons in the corner.</span>
           </div>
         )}
         {drawing && (
@@ -478,6 +583,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         <button className="icon" onClick={() => renderer.current?.frameVisible(true)} title="Fit to view (f)" aria-label="Fit to view"><Maximize size={16} /></button>
         <span className="sep" />
         <button className={'tool' + (slicing ? ' on' : '')} disabled={!!calibrating} onClick={() => (slicing ? setSlicing(false) : startSlicing())} title="Draw a rectangle to cut a slice (s)"><Crop size={15} />Slice</button>
+        <button className="tool" disabled={!!calibrating} onClick={openOutlineDialog} title="Place a fixed outline, such as the plot boundary, as a slice"><Pentagon size={15} />Outline</button>
         {slicing && <span className="hint">{mode === 'persp' ? 'Choose Top, Front or Side' : `Drag to cut ${targetName}`}</span>}
         <span className="sep" />
         <label className="size" title="Point size"><input type="range" min={0.6} max={4} step={0.1} value={pointSize} onChange={e => setPointSize(+e.target.value)} aria-label="Point size" /></label>
@@ -516,7 +622,10 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
             {!sources.length && <p className="muted pad">Nothing to show yet.</p>}
           </div>
           )}
-          {selectedSlice && !calibrating && <BoundsEditor slice={selectedSlice} onChange={box => updateBox(selectedSlice, box)} />}
+          {selectedSlice && !calibrating && !selectedShape && <BoundsEditor slice={selectedSlice} onChange={box => updateBox(selectedSlice, box)} />}
+          {selectedSlice && !calibrating && selectedShape && movableOutline?.shape && (
+            <OutlineEditor slice={selectedSlice} shape={movableOutline.shape} onShape={shape => updateShape(movableOutline, shape)} onExpand={v => updateRing(selectedSlice, v)} />
+          )}
           {!calibrating && <footer>
             {exporting ? (
               <div className="export-progress">
@@ -574,6 +683,71 @@ function Row({depth, name, detail, checked, selected, compare, calibrated, onTog
       <input type="checkbox" checked={checked} onChange={onToggle} onClick={e => e.stopPropagation()} aria-label={`Show ${name}`} />
       <span className="name">{name}{calibrated && <Compass size={12} className="compare-mark" aria-label="Orientation calibrated" />}{compare && <Columns2 size={12} className="compare-mark" />}</span>
       <span className="detail">{detail}</span>
+    </div>
+  );
+}
+
+type Preset = 'lyckan' | 'rectangle' | 'custom';
+/** Choose an outline: the plot from the cadastral extract, a rectangle of a given area, or typed corners. */
+function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; onSubmit: (name: string, vertices: XY[], band: number | null) => void; onCancel: () => void}) {
+  const [preset, setPreset] = useState<Preset>('lyckan');
+  const [name, setName] = useState('Lyckan 8');
+  const [areaText, setAreaText] = useState('2358');
+  const [aspect, setAspect] = useState('1.5');
+  const [text, setText] = useState(formatVertices(LYCKAN_8));
+  const [withBand, setWithBand] = useState(true);
+  const [band, setBand] = useState('2');
+  const vertices = preset === 'lyckan' ? LYCKAN_8 : preset === 'rectangle' ? rectangle(Math.max(1, +areaText || 1), Math.max(0.2, +aspect || 1)) : parseVertices(text);
+  const size = vertices ? polygonArea(vertices) : 0;
+  const ok = !!vertices && name.trim().length > 0 && (!withBand || (+band > 0));
+  const choose = (p: Preset) => { setPreset(p); if (p === 'lyckan') setName('Lyckan 8'); else if (name === 'Lyckan 8') setName(defaultName); if (p === 'custom' && preset !== 'custom') setText(formatVertices(vertices ?? LYCKAN_8)); };
+  return (
+    <Modal title="Outline slice" onClose={onCancel} width={520}>
+      <form onSubmit={e => { e.preventDefault(); if (ok && vertices) onSubmit(name.trim(), vertices, withBand ? +band : null); }}>
+        <div className="field"><span>Shape</span>
+          <Segmented value={preset} onChange={choose} options={[{value: 'lyckan', label: 'Lyckan 8 plot'}, {value: 'rectangle', label: 'Rectangle'}, {value: 'custom', label: 'Corners'}]} />
+          <small>{preset === 'lyckan' ? 'Five corners from the certified cadastral extract, 1:400. Registered area 2358 m².' : preset === 'rectangle' ? 'A rectangle of the given area and width-to-height ratio.' : 'One corner per line as x y in metres, in order around the shape.'}</small>
+        </div>
+        {preset === 'rectangle' && (
+          <div className="row">
+            <label className="field inline"><span>Area</span><span className="unit"><input type="number" min={1} value={areaText} onChange={e => setAreaText(e.target.value)} /> m²</span></label>
+            <label className="field inline"><span>Width to height</span><input type="number" min={0.2} step={0.1} value={aspect} onChange={e => setAspect(e.target.value)} /></label>
+          </div>
+        )}
+        {preset === 'custom' && <label className="field"><span>Corners</span><textarea rows={6} value={text} onChange={e => setText(e.target.value)} spellCheck={false} /></label>}
+        <p className="note">{vertices ? `${vertices.length} corners, ${Math.round(size).toLocaleString()} m². It is placed at the centre of the view; drag it into place and turn it with the corner buttons.` : 'Enter at least three corners.'}</p>
+        <label className="field"><span>Name</span><input value={name} onChange={e => setName(e.target.value)} /></label>
+        <label className="choice"><input type="checkbox" checked={withBand} onChange={e => setWithBand(e.target.checked)} />
+          <span><strong>Add a perimeter band</strong><small>A second slice covering the ground outside the outline, this far out.</small></span></label>
+        {withBand && <label className="field inline indent"><span>Band width</span><span className="unit"><input type="number" min={0.1} step={0.5} value={band} onChange={e => setBand(e.target.value)} /> m</span></label>}
+        <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!ok}>Create</button></footer>
+      </form>
+    </Modal>
+  );
+}
+
+/** Position, turn and band width of an outline slice. Arrow keys nudge. */
+function OutlineEditor({slice, shape, onShape, onExpand}: {slice: Slice; shape: Shape; onShape: (s: Shape) => void; onExpand: (v: number) => void}) {
+  const fields: {label: string; value: number; step: number; unit: string; set: (v: number) => void}[] = [
+    {label: 'X', value: shape.position[0], step: 0.1, unit: 'm', set: v => onShape({...shape, position: [v, shape.position[1]]})},
+    {label: 'Y', value: shape.position[1], step: 0.1, unit: 'm', set: v => onShape({...shape, position: [shape.position[0], v]})},
+    {label: 'Turn', value: shape.rotation, step: 0.5, unit: '°', set: v => onShape({...shape, rotation: v})},
+  ];
+  if (slice.ring) fields.push({label: 'Band', value: slice.ring.expand, step: 0.5, unit: 'm', set: v => onExpand(Math.max(0.1, v))});
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  useEffect(() => { setDraft({}); }, [shape, slice.ring?.expand]);
+  return (
+    <div className="bounds orientation">
+      <h3>{slice.name}, {Math.round(polygonArea(shape.vertices)).toLocaleString()} m²</h3>
+      {fields.map(f => (
+        <div className="axis" key={f.label}><span>{f.label}</span>
+          <input value={draft[f.label] ?? f.value.toFixed(2)} onChange={e => setDraft(d => ({...d, [f.label]: e.target.value}))}
+            onBlur={() => { const v = Number(draft[f.label]); if (draft[f.label] != null && isFinite(v)) f.set(v); else setDraft(d => ({...d, [f.label]: undefined as unknown as string})); }}
+            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); f.set(Math.round((f.value + (e.key === 'ArrowUp' ? f.step : -f.step)) * 100) / 100); } }}
+            aria-label={f.label} />
+          <span className="unit">{f.unit}</span>
+        </div>
+      ))}
     </div>
   );
 }

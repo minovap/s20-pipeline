@@ -32,7 +32,7 @@ const real = {
   startJob: (options: Job) => invoke<void>('start_job', {options}),
   cancelJob: () => invoke<void>('cancel_job'),
 
-  exportSlices: (spec: {output: string; sources: {path: string; boxes: Box[]; transform?: {rotation: number[]; origin: number[]; translation: number[]} | null}[]; allow_outside?: boolean}) => invoke<string>('export_slices', {spec}),
+  exportSlices: (spec: {output: string; sources: {path: string; boxes?: Box[]; regions?: {box: Box; polygons: {vertices: [number, number][]; mode: 'inside' | 'ring'; expand: number}[]}[]; transform?: {rotation: number[]; origin: number[]; translation: number[]} | null}[]; allow_outside?: boolean}) => invoke<string>('export_slices', {spec}),
   cancelExport: () => invoke<void>('cancel_export'),
 
   loadPreview: (source: string, budget: number) => invoke<Preview>('load_preview', {source, budget}),
