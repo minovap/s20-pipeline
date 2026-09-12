@@ -9,6 +9,12 @@ export type XY = [number, number];
 /** Lyckan 8 from the certified cadastral extract (Danderyd, 1:400, SWEREF 99 18 00).
  *  Five corners, x east and y north in metres from the north-west corner; 2352 m² against the registered 2358 m². */
 export const LYCKAN_8: XY[] = [[0, 0], [39.53, -0.47], [43.83, -62.26], [7.54, -58.74], [4.42, -55.49]];
+/** Building footprints from the same extract, in the same frame: the house, the annex and a shed. Drawn as placement guides only. */
+export const LYCKAN_8_BUILDINGS: XY[][] = [
+  [[22.5, -38.2], [22.27, -38.54], [20.46, -38.36], [20.54, -37.56], [17.86, -37.27], [17.66, -39.32], [14.34, -38.98], [13.31, -49.26], [14.53, -49.4], [15.34, -50.45], [17.39, -50.65], [17.22, -52.09], [21.83, -52.55], [21.98, -51.12], [24.05, -51.33], [25.03, -50.53], [26.25, -50.67], [27.45, -38.7]],
+  [[14.17, -40.64], [13.48, -47.53], [7.5, -46.94], [8.21, -40.03]],
+  [[27.42, -38.88], [31.75, -39.34], [31.34, -42.45], [27.11, -42.03]],
+];
 
 export function area(vertices: XY[]): number {
   let sum = 0;
@@ -29,6 +35,11 @@ export function centroid(vertices: XY[]): XY {
 export function centred(vertices: XY[]): XY[] {
   const [cx, cy] = centroid(vertices);
   return vertices.map(([x, y]) => [x - cx, y - cy]);
+}
+/** Shift extra polylines by the same amount `centred` applied to the outline they belong to. */
+export function centredWith(outline: XY[], others: XY[][]): XY[][] {
+  const [cx, cy] = centroid(outline);
+  return others.map(poly => poly.map(([x, y]) => [x - cx, y - cy] as XY));
 }
 
 export function rectangle(areaM2: number, aspect = 1.5): XY[] {
@@ -52,8 +63,11 @@ export const formatVertices = (vertices: XY[]) => vertices.map(([x, y]) => `${x.
 
 /** Polygon in world XY after rotation (degrees, counterclockwise) and placement. */
 export function worldPolygon(shape: Shape): XY[] {
+  return worldPoints(shape, shape.vertices);
+}
+export function worldPoints(shape: Pick<Shape, 'position' | 'rotation'>, points: XY[]): XY[] {
   const a = (shape.rotation * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
-  return shape.vertices.map(([x, y]) => [shape.position[0] + x * c - y * s, shape.position[1] + x * s + y * c]);
+  return points.map(([x, y]) => [shape.position[0] + x * c - y * s, shape.position[1] + x * s + y * c]);
 }
 
 /** Approximate outward offset for display: each vertex moves along its angle bisector. */

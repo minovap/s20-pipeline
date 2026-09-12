@@ -257,8 +257,8 @@ export class CloudRenderer {
     this.scene.add(this.grid);
   }
 
-  /** Outline polygons (world XY, a z range) drawn as a top and bottom loop with corner posts. */
-  setPolygons(polys: {points: [number, number][]; z: [number, number]; strong: boolean}[]) {
+  /** Outline polygons (world XY, a z range) drawn as a top and bottom loop with corner posts; guides are one dashed loop. */
+  setPolygons(polys: {points: [number, number][]; z: [number, number]; strong: boolean; dashed?: boolean}[]) {
     for (const line of this.polygons) { this.scene.remove(line); line.geometry.dispose(); (line.material as THREE.Material).dispose(); }
     this.polygons = [];
     const o = this.worldOrigin;
@@ -266,15 +266,19 @@ export class CloudRenderer {
     for (const poly of polys) {
       const pts: number[] = [];
       const n = poly.points.length;
+      const levels = poly.dashed ? [poly.z[0]] : poly.z;
       for (let i = 0; i < n; i++) {
         const [ax, ay] = poly.points[i], [bx, by] = poly.points[(i + 1) % n];
-        for (const z of poly.z) pts.push(ax - o.x, ay - o.y, z - o.z, bx - o.x, by - o.y, z - o.z);
-        pts.push(ax - o.x, ay - o.y, poly.z[0] - o.z, ax - o.x, ay - o.y, poly.z[1] - o.z);
+        for (const z of levels) pts.push(ax - o.x, ay - o.y, z - o.z, bx - o.x, by - o.y, z - o.z);
+        if (!poly.dashed) pts.push(ax - o.x, ay - o.y, poly.z[0] - o.z, ax - o.x, ay - o.y, poly.z[1] - o.z);
       }
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3));
-      const material = new THREE.LineBasicMaterial({color: poly.strong ? 0xd8c27a : 0x9fc59b, transparent: true, opacity: poly.strong ? 0.95 : 0.6});
+      const material = poly.dashed
+        ? new THREE.LineDashedMaterial({color: 0xe8e4dc, transparent: true, opacity: 0.5, dashSize: 0.6, gapSize: 0.4})
+        : new THREE.LineBasicMaterial({color: poly.strong ? 0xd8c27a : 0x9fc59b, transparent: true, opacity: poly.strong ? 0.95 : 0.6});
       const line = new THREE.LineSegments(geometry, material);
+      if (poly.dashed) line.computeLineDistances();
       this.scene.add(line);
       this.polygons.push(line);
     }

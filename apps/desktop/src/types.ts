@@ -57,7 +57,7 @@ export type Run = {
 
 export type Box = [[number, number, number], [number, number, number]];
 /** A fixed outline placed over the cloud. Vertices are metres about the shape's centre. */
-export type Shape = {vertices: [number, number][]; position: [number, number]; rotation: number};
+export type Shape = {vertices: [number, number][]; position: [number, number]; rotation: number; /** dashed placement guides such as buildings, same frame as the vertices */ guides?: [number, number][][]};
 export type Slice = {
   id: string; name: string; source: string; parent: string | null; box: Box; created: number;
   /** Outline slice: points inside the polygon (within the box's z range). */

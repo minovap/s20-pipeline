@@ -254,6 +254,7 @@ pre.log { margin: 0 16px 8px 48px; padding: 10px 12px; background: var(--bg); bo
 .outline-preview .field { margin: 0; }
 .shape-preview { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); }
 .shape-preview polygon { fill: rgba(216, 194, 122, 0.18); stroke: var(--amber); stroke-width: 1.5; stroke-linejoin: round; }
+.shape-preview polygon.guide { fill: none; stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 2; }
 .shape-preview circle { fill: var(--text); }
 .shape-preview text { fill: var(--muted); font-size: 10px; }
 .modal textarea { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 8px; font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--text); resize: vertical; }

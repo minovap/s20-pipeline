@@ -10,7 +10,7 @@ import type {Box, Cloud, ExportEvent, Orientation, Project, Shape, Slice} from '
 import {PREVIEW_MAX, defaultBudget} from '../types';
 import {CloudRenderer, DEPTH_AXIS, type ViewMode} from './render';
 import {children, countMask, descendants, effectiveBox, effectiveRegion, intersect, newId, nextSliceName, normalize, unionMask} from './slices';
-import {LYCKAN_8, area as polygonArea, centred, formatVertices, offsetPolygon, parseVertices, rectangle, shapeBox, shapeOf, worldPolygon} from './shape';
+import {LYCKAN_8, LYCKAN_8_BUILDINGS, area as polygonArea, centred, centredWith, formatVertices, offsetPolygon, parseVertices, rectangle, shapeBox, shapeOf, worldPoints, worldPolygon} from './shape';
 import type {XY} from './shape';
 
 type Source = {path: string; name: string; detail: string; kind: 'result' | 'export' | 'import'};
@@ -41,7 +41,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const [zRange, setZRange] = useState<[number, number] | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   /** An outline being placed before it becomes a slice: dragged and turned over the whole cloud, then cropped. */
-  type Placing = {name: string; vertices: XY[]; band: number | null; source: string; parent: Slice | null; z: [number, number]; position: [number, number]; rotation: number};
+  type Placing = {name: string; vertices: XY[]; guides: XY[][]; band: number | null; source: string; parent: Slice | null; z: [number, number]; position: [number, number]; rotation: number};
   const [placing, setPlacing] = useState<Placing | null>(null);
   const placeDrag = useRef<{startPosition: [number, number]; origin: V3} | null>(null);
   /** An outline being dragged: its slice and the position it has right now. */
@@ -94,7 +94,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (params.get('calibrate')) setTimeout(() => startCalibration(first), 800);
     if (params.get('outline')) setTimeout(() => openOutlineRef.current(), 2500);
     if (params.get('zhi')) setTimeout(() => setHeightWindow({lo: params.get('zlo') ? +params.get('zlo')! : null, hi: +params.get('zhi')!}), 2500);
-    if (params.get('place')) setTimeout(() => setPlacing({name: 'Lyckan 8', vertices: centred(LYCKAN_8), band: 2, source: first, parent: null, z: [-1, 5], position: [0, 0], rotation: 20}), 2500);
+    if (params.get('place')) setTimeout(() => setPlacing({name: 'Lyckan 8', vertices: centred(LYCKAN_8), guides: centredWith(LYCKAN_8, LYCKAN_8_BUILDINGS), band: 2, source: first, parent: null, z: [-1, 5], position: [0, 0], rotation: 20}), 2500);
   }, [project, sources, focus]);
 
   // ---- renderer lifecycle
@@ -180,8 +180,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (!r) return;
     if (placing) {
       const base = worldPolygon({vertices: placing.vertices, position: placing.position, rotation: placing.rotation});
-      const polys = [{points: base, z: placing.z, strong: true}];
+      const polys: {points: XY[]; z: [number, number]; strong: boolean; dashed?: boolean}[] = [{points: base, z: placing.z, strong: true}];
       if (placing.band != null) polys.push({points: offsetPolygon(base, placing.band), z: placing.z, strong: false});
+      for (const g of placing.guides) polys.push({points: worldPoints(placing, g), z: placing.z, strong: false, dashed: true});
       r.setOutline(null);
       r.setPolygons(polys);
       return;
@@ -190,8 +191,9 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (selectedSlice && selectedShape && box) {
       const z: [number, number] = [box[0][2], box[1][2]];
       const base = worldPolygon(selectedShape);
-      const polys = [{points: base, z, strong: !selectedSlice.ring}];
+      const polys: {points: XY[]; z: [number, number]; strong: boolean; dashed?: boolean}[] = [{points: base, z, strong: !selectedSlice.ring}];
       if (selectedSlice.ring) polys.push({points: offsetPolygon(base, selectedSlice.ring.expand), z, strong: true});
+      for (const g of selectedShape.guides ?? []) polys.push({points: worldPoints(selectedShape, g), z, strong: false, dashed: true});
       r.setOutline(null);
       r.setPolygons(polys);
     } else {
@@ -429,19 +431,19 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (!parentBox) { onError('The point cloud is still loading.'); return; }
     const target = sliceTarget;
     setDialog(<OutlineDialog defaultName={nextSliceName(slices, target.parent)} onCancel={() => setDialog(null)}
-      onSubmit={(name, vertices, band) => {
+      onSubmit={(name, vertices, band, guides) => {
         setDialog(null);
         const centre: [number, number] = [(parentBox[0][0] + parentBox[1][0]) / 2, (parentBox[0][1] + parentBox[1][1]) / 2];
         const z: [number, number] = [parentBox[0][2], parentBox[1][2]];
         setSlicing(false);
-        setPlacing({name, vertices: centred(vertices), band, source: target.source, parent: target.parent, z, position: centre, rotation: 0});
+        setPlacing({name, vertices: centred(vertices), guides: centredWith(vertices, guides), band, source: target.source, parent: target.parent, z, position: centre, rotation: 0});
         if (mode === 'persp') setMode('top');
       }} />);
   }
   /** Turn the placed outline into slices at its current position. */
   function crop() {
     if (!placing) return;
-    const shape: Shape = {vertices: placing.vertices, position: placing.position, rotation: placing.rotation};
+    const shape: Shape = {vertices: placing.vertices, position: placing.position, rotation: placing.rotation, ...(placing.guides.length ? {guides: placing.guides} : {})};
     const outline: Slice = {id: newId(), name: placing.name, source: placing.source, parent: placing.parent?.id ?? null, box: shapeBox(shape, 'inside', 0, placing.z), created: Date.now() / 1000, shape};
     const created = [outline];
     if (placing.band != null) created.push({id: newId(), name: `${placing.name} perimeter`, source: placing.source, parent: outline.id, box: shapeBox(shape, 'ring', placing.band, placing.z), created: Date.now() / 1000, ring: {expand: placing.band}});
@@ -753,7 +755,7 @@ function Row({depth, name, detail, checked, selected, compare, calibrated, onTog
 
 type Preset = 'lyckan' | 'rectangle' | 'custom';
 /** Choose an outline: the plot from the cadastral extract, a rectangle of a given area, or typed corners. */
-function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; onSubmit: (name: string, vertices: XY[], band: number | null) => void; onCancel: () => void}) {
+function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; onSubmit: (name: string, vertices: XY[], band: number | null, guides: XY[][]) => void; onCancel: () => void}) {
   const [preset, setPreset] = useState<Preset>('lyckan');
   const [name, setName] = useState('Lyckan 8');
   const [areaText, setAreaText] = useState('2358');
@@ -767,10 +769,10 @@ function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; 
   const choose = (p: Preset) => { setPreset(p); if (p === 'lyckan') setName('Lyckan 8'); else if (name === 'Lyckan 8') setName(defaultName); if (p === 'custom' && preset !== 'custom') setText(formatVertices(vertices ?? LYCKAN_8)); };
   return (
     <Modal title="Outline slice" onClose={onCancel} width={520}>
-      <form onSubmit={e => { e.preventDefault(); if (ok && vertices) onSubmit(name.trim(), vertices, withBand ? +band : null); }}>
+      <form onSubmit={e => { e.preventDefault(); if (ok && vertices) onSubmit(name.trim(), vertices, withBand ? +band : null, preset === 'lyckan' ? LYCKAN_8_BUILDINGS : []); }}>
         <div className="field"><span>Shape</span>
           <Segmented value={preset} onChange={choose} options={[{value: 'lyckan', label: 'Lyckan 8 plot'}, {value: 'rectangle', label: 'Rectangle'}, {value: 'custom', label: 'Corners'}]} />
-          <small>{preset === 'lyckan' ? 'Five corners from the certified cadastral extract, 1:400. Registered area 2358 m².' : preset === 'rectangle' ? 'A rectangle of the given area and width-to-height ratio.' : 'One corner per line as x y in metres, in order around the shape.'}</small>
+          <small>{preset === 'lyckan' ? 'Five corners from the certified cadastral extract, 1:400. Registered area 2358 m². The house, annex and shed are drawn dashed to help placing.' : preset === 'rectangle' ? 'A rectangle of the given area and width-to-height ratio.' : 'One corner per line as x y in metres, in order around the shape.'}</small>
         </div>
         {preset === 'rectangle' && (
           <div className="row">
@@ -779,7 +781,7 @@ function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; 
           </div>
         )}
         <div className="outline-preview">
-          <ShapePreview vertices={vertices ?? []} />
+          <ShapePreview vertices={vertices ?? []} guides={preset === 'lyckan' ? LYCKAN_8_BUILDINGS : []} />
           <label className="field"><span>Corners, x y in metres</span>
             <textarea rows={7} value={preset === 'custom' ? text : formatVertices(vertices ?? [])} readOnly={preset !== 'custom'} onChange={e => setText(e.target.value)} spellCheck={false} />
           </label>
@@ -796,17 +798,19 @@ function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; 
 }
 
 /** Small drawing of an outline, north up, with the corners marked. */
-function ShapePreview({vertices}: {vertices: XY[]}) {
+function ShapePreview({vertices, guides = []}: {vertices: XY[]; guides?: XY[][]}) {
   const size = 170;
   if (vertices.length < 3) return <svg className="shape-preview" width={size} height={size} />;
   const xs = vertices.map(v => v[0]), ys = vertices.map(v => v[1]);
   const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys);
   const k = (size - 24) / Math.max(w, h, 1e-6);
   const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-  const pts = vertices.map(([x, y]) => [size / 2 + (x - cx) * k, size / 2 - (y - cy) * k] as XY);
+  const project = (poly: XY[]) => poly.map(([x, y]) => [size / 2 + (x - cx) * k, size / 2 - (y - cy) * k] as XY);
+  const pts = project(vertices);
   return (
     <svg className="shape-preview" width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-label="Outline preview">
       <polygon points={pts.map(p => p.join(',')).join(' ')} />
+      {guides.map((g, i) => <polygon key={i} className="guide" points={project(g).map(p => p.join(',')).join(' ')} />)}
       {pts.map((p, i) => <circle key={i} cx={p[0]} cy={p[1]} r={2.5} />)}
       <text x={size - 4} y={12} textAnchor="end">N ↑</text>
     </svg>
