@@ -93,7 +93,47 @@ Validation: use the small scan as the acceptance and performance benchmark, per 
 
 ### 2. Metal projection and depth test for the collector
 
-Only after task 1. Move the per-photo projection, depth-buffer build and visibility test into a Metal kernel driven from a small Objective-C++ host, following the structure of `native/geometry.mm` (`MetalRayFilter`, `make_buffer`, `dispatch` with its per-launch `@autoreleasepool`). Keep the existing NumPy path selectable for parity testing, like `--blend cpu` does for the blend stage (see `worker.py` stage `blend` and `cli.py` `--blend`). The kernel must reproduce `project()` from `src/s20_pipeline/camera.py` (fisheye model) and the visibility rule in `color_chunk` exactly; use float32 throughout as NumPy does. Validate by comparing `observations.bin` with the NumPy path on the small scan; small float differences in `u, v` are acceptable only if the chosen photo ids and the visible flags are identical.
+Only after task 1. Use the **small indoor scan** as the acceptance and performance benchmark. Implement this task in the checkpoints below; mark the whole task done only after both Metal checkpoints pass validation.
+
+#### First: validate an all-float32 CPU reference
+
+Do not assume the current NumPy collector uses float32 throughout. `project()` uses float32 for the native float32 geometry, but `plane_depth`, `hit`, and `patch_distance` in `collect.py` become float64 through the camera center; the decoded exact-depth calculation also uses float64. An all-float32 implementation is worth testing before deciding that mixed precision must be preserved.
+
+- Freeze the current CPU reference and its small-scan `observations.bin`. Reuse identical geometry, camera frames, calibration, photos, masks, photo order and collector settings for every comparison.
+- Create a CPU experimental variant with explicitly float32 floating-point visibility calculations, including camera-center arithmetic, plane intersections, patch distances and depth comparisons. Keep packed depth keys and point IDs as exact integers. Do not change thresholds, quantization or ranking rules.
+- Compare the experimental `observations.bin` with the frozen reference using `cmp`. Byte identity is the primary output acceptance check for this experiment. Also compare per-photo validity and visibility flags: the observation file retains only the top four candidates and cannot expose every intermediate visibility decision.
+- If both output and decision parity pass, use the validated float32 variant as the implementation reference for the Metal port, while retaining the original golden output. Record that this validates the small scan and boundary fixtures, rather than proving equivalence for every possible input.
+- If comparisons differ, identify the first differing photo, point and decision. Preserve the required CPU calculations, or develop and validate a targeted CPU recheck for numerically ambiguous cases. Do not silently relax thresholds or replace the golden output to obtain a pass.
+
+#### 2A. Metal projection and deterministic depth buffers
+
+Move per-photo fisheye projection, depth-buffer construction and the neighborhood minimum to Metal. Keep visibility, masking, color sampling and candidate ranking on the CPU for this checkpoint so projection/depth disagreements can be isolated.
+
+- Reproduce `project()` from `src/s20_pipeline/camera.py`, including transform conventions, polynomial evaluation, axis handling, validity bounds and radial distance. Start with fast math disabled; do not copy geometry's fast-math setting when reusing its host structure.
+- Preserve `np.rint(d * 1e6)` depth quantization, the packed `(quantized depth, original point ID)` ordering, sentinel behavior and range checks. Task 1's culling must not renumber original point IDs. Check the target device's atomic capabilities and use a deterministic multi-pass reduction if necessary; do not replace exact integer tie-breaking with floating-point atomics.
+- Build the depth buffer from all retained points for the photo before testing any point's visibility. Preserve the exact radius-3 neighborhood minimum over packed keys. Chunked processing must retain global occluders across chunks.
+- Validate projected-pixel validity, exact depth keys, winning point IDs and neighborhood blocker IDs against the CPU reference before proceeding to 2B.
+
+#### 2B. Metal visibility
+
+Move the visibility calculation in `color_chunk` to Metal only after 2A passes parity. Reproduce the ray/normal incidence, plane intersection, patch-reliability and depth-threshold decisions using the precision strategy validated above. Keep masking, bilinear color sampling, scoring and top-four candidate selection on the CPU while validating this checkpoint.
+
+Require identical per-photo visibility flags and retained photo IDs. If GPU arithmetic changes a decision, diagnose it rather than accepting it merely because the final colored-point count happens to match. A CPU recheck for ambiguous cases is acceptable only when its decision parity and total runtime are measured.
+
+#### Host and backend integration
+
+Use a persistent Objective-C++ host, following `native/geometry.mm` for `MetalRayFilter`, buffer management and dispatch structure. Compile kernels once, load geometry and normals once within the memory budget, and reuse buffers across photos. Update camera parameters and selected point IDs per photo. Retain the per-launch `@autoreleasepool`; avoid launching a new process or copying the entire cloud for each photo.
+
+Add `--collector cpu|metal` through `cli.py` and the candidates stage in `worker.py`, following the existing `--blend` selection pattern. Keep CPU as the default until Metal passes the correctness and performance checks. Record the selected backend and required native/source identities in run metadata. Preserve Task 1's culling, `observations.bin` layout (`n × 4 × 8` float32), original point IDs and progress calls.
+
+#### Validation and performance acceptance
+
+- Provide an optional diagnostic comparison mode for per-photo projection validity, depth winners, neighborhood blocker IDs and visibility flags. Keep these diagnostics separate from the production observation-file layout.
+- Compare `observations.bin` with the frozen CPU output. Aim for byte identity. Small Metal differences in projected `u, v` are acceptable only within explicitly documented tolerances and with identical validity/visibility decisions, candidate occupancy and retained photo IDs in their ranked slots. Report score and color differences as well; unchanged photo IDs alone do not establish color parity.
+- Exercise image/pixel boundaries, equal-depth ties, neighborhood boundaries, near-axis projections, empty views, culling, chunk boundaries and each visibility threshold. Compare decisions against the original CPU reference, not only the experimental float32 variant.
+- Run the full small-scan pipeline and require exactly **6,024,829 colored points**. Report any exported color differences from the CPU result.
+- Benchmark with the same frozen small-scan inputs: one warm-up for each backend, then at least three alternating CPU/Metal measurements, one run at a time. Compare median total candidates-stage wall time, sampled peak RSS and Metal buffer allocation. Report kernel time separately; total stage time must include host initialization, transfers, allocations and output writing. Do not regenerate geometry between paired collector benchmarks.
+- Promote Metal to the default only after decision/output acceptance passes and median total collector time improves. Update `docs/PERFORMANCE.md` with the measurements and limitations. A full garden benchmark is not required for this task.
 
 ### 3. Parallelize the density kd-tree in geometry
 
