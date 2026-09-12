@@ -801,8 +801,8 @@ function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; 
         </div>
         {preset === 'rectangle' && (
           <div className="row">
-            <label className="field inline"><span>Area</span><span className="unit"><input type="number" min={1} value={areaText} onChange={e => setAreaText(e.target.value)} /> m²</span></label>
-            <label className="field inline"><span>Width to height</span><input type="number" min={0.2} step={0.1} value={aspect} onChange={e => setAspect(e.target.value)} /></label>
+            <label className="field inline"><span>Area</span><span className="unit"><input type="number" min={1} step="any" value={areaText} onChange={e => setAreaText(e.target.value)} /> m²</span></label>
+            <label className="field inline"><span>Width to height</span><input type="number" min={0.2} step="any" value={aspect} onChange={e => setAspect(e.target.value)} /></label>
           </div>
         )}
         <div className="outline-preview">
@@ -815,7 +815,7 @@ function OutlineDialog({defaultName, onSubmit, onCancel}: {defaultName: string; 
         <label className="field"><span>Name</span><input value={name} onChange={e => setName(e.target.value)} /></label>
         <label className="choice"><input type="checkbox" checked={withBand} onChange={e => setWithBand(e.target.checked)} />
           <span><strong>Add a perimeter band</strong><small>A second slice covering the ground outside the outline, this far out.</small></span></label>
-        {withBand && <label className="field inline indent"><span>Band width</span><span className="unit"><input type="number" min={0.1} step={0.5} value={band} onChange={e => setBand(e.target.value)} /> m</span></label>}
+        {withBand && <label className="field inline indent"><span>Band width</span><span className="unit"><input type="number" min={0} step="any" value={band} onChange={e => setBand(e.target.value)} /> m</span></label>}
         <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!ok}>Create</button></footer>
       </form>
     </Modal>
