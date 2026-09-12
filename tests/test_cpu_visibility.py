@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from s20_pipeline.camera import CameraFrame, FisheyeCalibration
+from s20_pipeline.camera import CameraFrame, FisheyeCalibration, project
 from s20_pipeline.collect import visibility_decisions
 from s20_pipeline.cpu_visibility import CpuVisibility
 
@@ -25,6 +26,73 @@ def camera():
         np.eye(3),
         calibration,
     )
+
+
+@native_required
+def test_native_partial_projection_matches_numpy_valid_rows_bitwise():
+    rng = np.random.default_rng(772)
+    points = rng.uniform(-8, 8, (25_000, 3)).astype("float32")
+    calibration = replace(
+        camera().calibration,
+        width=640,
+        height=480,
+        coefficients=(0.13, -0.021, 0.004, -0.0007, 0.00009, -0.000008),
+        a11=190.25,
+        a12=1.75,
+        a22=188.5,
+        u0=319.75,
+        v0=239.25,
+        max_incident_angle_deg=112.3,
+    )
+    rotation, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    frame = replace(
+        camera(),
+        center=np.array([0.123456789, -2.345678901, 1.111111111]),
+        camera_to_world=rotation,
+        calibration=calibration,
+    )
+    u, v, angle, distance = project(points, frame)
+    valid = (
+        (distance > 0.1)
+        & np.isfinite(u)
+        & np.isfinite(v)
+        & (u >= 0)
+        & (v >= 0)
+        & (u < calibration.width - 1)
+        & (v < calibration.height - 1)
+        & (angle < np.deg2rad(calibration.max_incident_angle_deg))
+    )
+    expected_positions = np.flatnonzero(valid).astype("uint32")
+    native = CpuVisibility(points, points, LIBRARY)
+    actual = native.project_valid(points, frame)
+    np.testing.assert_array_equal(actual.positions, expected_positions)
+    for expected, candidate in zip(
+        (u[valid], v[valid], angle[valid], distance[valid]),
+        (actual.u, actual.v, actual.angle, actual.distance),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(candidate.view("uint32"), expected.view("uint32"))
+    expected_pixels = (
+        v[valid].astype("int32") // 4 * ((calibration.width + 3) // 4)
+        + u[valid].astype("int32") // 4
+    )
+    np.testing.assert_array_equal(actual.pixels, expected_pixels)
+
+
+@native_required
+@pytest.mark.parametrize(
+    ("calibration", "message"),
+    [
+        (replace(camera().calibration, coefficients=(0.0,) * 5), "six distortion"),
+        (replace(camera().calibration, width=300_000, height=300_000), "depth grid"),
+    ],
+)
+def test_native_partial_projection_rejects_unsafe_calibration_shapes(calibration, message):
+    frame = replace(camera(), calibration=calibration)
+    geometry = np.ones((1, 3), dtype="float32")
+    native = CpuVisibility(geometry, geometry, LIBRARY)
+    with pytest.raises(ValueError, match=message):
+        native.project_valid(np.ones((1, 3), dtype="float32"), frame)
 
 
 @native_required

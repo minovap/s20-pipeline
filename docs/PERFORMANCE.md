@@ -216,3 +216,15 @@ Final ranking now uses a fixed stable insertion sort for each point's four recor
 | Native stable sort/count | 9.198 s, 9.177 s, 9.073 s | 9.177 s |
 
 This is another **8.56% wall-time reduction** (`1.094×`). The profiled final-sort/count phase fell from 0.879 s to 0.120 s. All three full observation files matched the frozen golden file byte for byte. The combined median improvement from the original 24.390-second CPU baseline is **62.4%** (`2.658×`).
+
+
+## Partial native projection fusion, 12 September 2026
+
+The exact CPU path still computes the float32 camera transform, `hypot` and `atan2` in NumPy with the original chunk shapes. A native elementwise tail then compares the float32 angle against the original float64 `deg2rad` threshold and fuses the float32 distortion polynomial, distance norm, intrinsics, validity checks, quarter-resolution pixel calculation and valid-row packing. This avoids the slower NumPy angular-compaction experiment and its intermediate gathers without replacing transcendental functions. Per-worker output scratch is bounded by the existing projection chunk, and only valid rows survive the call. NumPy `camera.project()` remains the diagnostic oracle and the no-library production fallback.
+
+| Collector | Candidate-stage wall samples | Median wall | Median sampled RSS |
+|---|---|---:|---:|
+| Native stable sort/count | 9.198 s, 9.177 s, 9.073 s | 9.177 s | 2.589 GB |
+| Partial native projection | 7.248 s, 7.085 s, 7.134 s | 7.134 s | 2.668 GB |
+
+This is another **22.26% wall-time reduction** (`1.286×`). The profiled projection/depth phase fell from 4.779 s to 2.823 s. Direct varied-calibration tests compare valid positions, `u/v`, angle, distance and pixel IDs bit-for-bit, and all three full observations match the frozen golden file byte for byte. The 79 MB (`3.0%`) median sampled-RSS increase is consistent with bounded per-worker projection scratch plus final file-backed peak variability, but those causes were not isolated. The combined median improvement from the original 24.390-second CPU baseline is **70.7%** (`3.419×`).

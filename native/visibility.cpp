@@ -20,7 +20,74 @@ inline float dot3(const float *a, float x, float y, float z) {
 
 }  // namespace
 
-extern "C" uint32_t s20_visibility_abi_version() { return 5u; }
+extern "C" uint32_t s20_visibility_abi_version() { return 6u; }
+
+extern "C" int s20_project_valid(
+    const float *camera,
+    const float *radial,
+    const float *theta,
+    uint64_t count,
+    const float *coefficients,
+    const float *intrinsics,
+    double max_angle,
+    uint32_t image_width,
+    uint32_t image_height,
+    uint32_t depth_width,
+    uint32_t *positions,
+    float *output_u,
+    float *output_v,
+    float *output_angle,
+    float *output_distance,
+    uint32_t *pixels,
+    uint64_t *valid_count
+) {
+    if (!camera || !radial || !theta || !coefficients || !intrinsics || !positions || !output_u ||
+        !output_v || !output_angle || !output_distance || !pixels || !valid_count ||
+        image_width < 2u || image_height < 2u || depth_width == 0u || count > UINT32_MAX) {
+        return 1;
+    }
+    uint64_t output = 0;
+    for (uint64_t index = 0; index < count; ++index) {
+        const float angle = theta[index];
+        if (!(double(angle) < max_angle)) continue;
+        float distorted = angle;
+        float power = angle * angle;
+        for (uint32_t coefficient = 0; coefficient < 6u; ++coefficient) {
+            distorted += coefficients[coefficient] * power;
+            power *= angle;
+        }
+        const float radius = radial[index];
+        const float scale = radius > 1e-10f ? distorted / radius : 1.0f;
+        const float *coordinate = camera + size_t(index) * 3u;
+        const float normalized_x = coordinate[0] * scale;
+        const float normalized_y = coordinate[1] * scale;
+        float u = intrinsics[0] * normalized_x;
+        u += intrinsics[1] * normalized_y;
+        u += intrinsics[3];
+        float v = intrinsics[2] * normalized_y;
+        v += intrinsics[4];
+        float squared_distance = 0.0f;
+        squared_distance += coordinate[0] * coordinate[0];
+        squared_distance += coordinate[1] * coordinate[1];
+        squared_distance += coordinate[2] * coordinate[2];
+        const float distance = std::sqrt(squared_distance);
+        if (!(distance > 0.1f) || !std::isfinite(u) || !std::isfinite(v) || u < 0.0f ||
+            v < 0.0f || u >= float(image_width - 1u) || v >= float(image_height - 1u)) {
+            continue;
+        }
+        const int32_t x = static_cast<int32_t>(u);
+        const int32_t y = static_cast<int32_t>(v);
+        positions[output] = static_cast<uint32_t>(index);
+        output_u[output] = u;
+        output_v[output] = v;
+        output_angle[output] = angle;
+        output_distance[output] = distance;
+        pixels[output] = uint32_t(y / 4) * depth_width + uint32_t(x / 4);
+        ++output;
+    }
+    *valid_count = output;
+    return 0;
+}
 
 extern "C" int s20_sort_count(
     float *observations,

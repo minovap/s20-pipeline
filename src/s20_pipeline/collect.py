@@ -259,6 +259,7 @@ def _cpu_projection_depth(
     workers,
     executor,
     projected_chunks=None,
+    projector=None,
 ):
     """Project fixed chunks in parallel, then merge exact per-worker depth minima.
 
@@ -266,6 +267,8 @@ def _cpu_projection_depth(
     their projection values. This preserves the projection batch shapes while
     avoiding a second validity scan over every selected point.
     """
+    if projector is not None and projection is not None:
+        raise ValueError("Native compact projection cannot populate a full projection array")
     n = len(xyz)
     count = n if selected is None else len(selected)
     worker_count = _depth_worker_count(count, chunk, workers, depth_id.nbytes)
@@ -279,30 +282,48 @@ def _cpu_projection_depth(
         for start in range(worker * chunk, count, worker_count * chunk):
             end = min(count, start + chunk)
             point_chunk = slice(start, end) if selected is None else selected[start:end]
-            u, v, angle, d = project(xyz[point_chunk], frame)
-            if projection is not None:
-                projection[start:end] = np.column_stack([u, v, angle, d])
-            valid = (
-                (d > 0.1)
-                & np.isfinite(u)
-                & np.isfinite(v)
-                & (u >= 0)
-                & (v >= 0)
-                & (u < cal.width - 1)
-                & (v < cal.height - 1)
-                & (angle < np.deg2rad(cal.max_incident_angle_deg))
-            )
-            ids = np.flatnonzero(valid) + start if selected is None else selected[start:end][valid]
-            pix = v[valid].astype("int32") // 4 * width + u[valid].astype("int32") // 4
+            if projector is None:
+                u, v, angle, d = project(xyz[point_chunk], frame)
+                if projection is not None:
+                    projection[start:end] = np.column_stack([u, v, angle, d])
+                valid = (
+                    (d > 0.1)
+                    & np.isfinite(u)
+                    & np.isfinite(v)
+                    & (u >= 0)
+                    & (v >= 0)
+                    & (u < cal.width - 1)
+                    & (v < cal.height - 1)
+                    & (angle < np.deg2rad(cal.max_incident_angle_deg))
+                )
+                ids = (
+                    np.flatnonzero(valid) + start
+                    if selected is None
+                    else selected[start:end][valid]
+                )
+                u = u[valid]
+                v = v[valid]
+                angle = angle[valid]
+                d = d[valid]
+                pix = v.astype("int32") // 4 * width + u.astype("int32") // 4
+            else:
+                native_projection = projector.project_valid(xyz[point_chunk], frame)
+                positions = native_projection.positions
+                ids = positions + start if selected is None else selected[start:end][positions]
+                u = native_projection.u
+                v = native_projection.v
+                angle = native_projection.angle
+                d = native_projection.distance
+                pix = native_projection.pixels
             if projected_chunks is not None:
                 projected_chunks[start // chunk] = (
                     np.ascontiguousarray(ids, dtype=id_dtype),
-                    u[valid],
-                    v[valid],
-                    angle[valid],
-                    d[valid],
+                    u,
+                    v,
+                    angle,
+                    d,
                 )
-            quant = np.rint(d[valid] * 1e6).astype("int64")
+            quant = np.rint(d * 1e6).astype("int64")
             if len(ids):
                 if int(quant.max()) >= (sentinel - n) // n:
                     raise ValueError("Scene exceeds int64 depth encoding range")
@@ -579,6 +600,7 @@ def collect(
                     workers,
                     executor,
                     projected_chunks,
+                    native_visibility,
                 )
                 projection_depth_s = perf_counter() - project_started
                 minimum_started = perf_counter()

@@ -17,6 +17,16 @@ class VisibilityResult:
     plane_shortcuts: int
 
 
+@dataclass(frozen=True)
+class ProjectionResult:
+    positions: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
+    angle: np.ndarray
+    distance: np.ndarray
+    pixels: np.ndarray
+
+
 class CpuVisibility:
     """Borrow immutable geometry and run stateless, allocation-free native chunks."""
 
@@ -38,7 +48,7 @@ class CpuVisibility:
         self.library = ctypes.CDLL(str(library))
         self.library.s20_visibility_abi_version.argtypes = []
         self.library.s20_visibility_abi_version.restype = ctypes.c_uint32
-        if self.library.s20_visibility_abi_version() != 5:
+        if self.library.s20_visibility_abi_version() != 6:
             raise RuntimeError("Unsupported native visibility ABI")
         self._configure()
     def _configure(self):
@@ -113,6 +123,93 @@ class CpuVisibility:
             ulong_pointer,
         ]
         self.library.s20_sort_count.restype = ctypes.c_int
+        self.library.s20_project_valid.argtypes = [
+            float_pointer,
+            float_pointer,
+            float_pointer,
+            ctypes.c_uint64,
+            float_pointer,
+            float_pointer,
+            ctypes.c_double,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            uint_pointer,
+            float_pointer,
+            float_pointer,
+            float_pointer,
+            float_pointer,
+            uint_pointer,
+            ulong_pointer,
+        ]
+        self.library.s20_project_valid.restype = ctypes.c_int
+
+    def project_valid(self, points, frame):
+        points = np.ascontiguousarray(points, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 3:
+            raise ValueError("Native projection expects an n x 3 point array")
+        if len(points) > np.iinfo(np.uint32).max:
+            raise ValueError("Native projection chunk length must fit uint32")
+        if not 2 <= frame.calibration.width <= np.iinfo(np.int32).max or not (
+            2 <= frame.calibration.height <= np.iinfo(np.int32).max
+        ):
+            raise ValueError("Native projection image dimensions must fit int32")
+        depth_width = (frame.calibration.width + 3) // 4
+        depth_height = (frame.calibration.height + 3) // 4
+        if depth_width * depth_height > np.iinfo(np.uint32).max:
+            raise ValueError("Native projection depth grid must fit uint32 pixel IDs")
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            camera = (points - frame.center.astype(np.float32)) @ frame.camera_to_world.astype(
+                np.float32
+            )
+        radial = np.hypot(camera[:, 0], camera[:, 1])
+        theta = np.arctan2(radial, camera[:, 2])
+        count = len(points)
+        positions = np.empty(count, dtype=np.uint32)
+        u = np.empty(count, dtype=np.float32)
+        v = np.empty(count, dtype=np.float32)
+        angle = np.empty(count, dtype=np.float32)
+        distance = np.empty(count, dtype=np.float32)
+        pixels = np.empty(count, dtype=np.uint32)
+        coefficients = np.asarray(frame.calibration.coefficients, dtype=np.float32)
+        if coefficients.shape != (6,):
+            raise ValueError("Native projection expects exactly six distortion coefficients")
+        intrinsics = np.asarray(
+            [
+                frame.calibration.a11,
+                frame.calibration.a12,
+                frame.calibration.a22,
+                frame.calibration.u0,
+                frame.calibration.v0,
+            ],
+            dtype=np.float32,
+        )
+        valid_count = ctypes.c_uint64()
+        result = self.library.s20_project_valid(
+            camera.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            radial.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            theta.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            count,
+            coefficients.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            intrinsics.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            np.deg2rad(frame.calibration.max_incident_angle_deg),
+            frame.calibration.width,
+            frame.calibration.height,
+            depth_width,
+            positions.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+            u.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            v.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            angle.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            distance.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            pixels.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+            ctypes.byref(valid_count),
+        )
+        if result:
+            raise RuntimeError(f"Native projection failed with error {result}")
+        end = valid_count.value
+        return ProjectionResult(
+            *(np.array(value[:end], copy=True) for value in (positions, u, v, angle, distance, pixels))
+        )
 
     def decide(self, ids, u, v, distance, blocker_keys, exact_keys, frame, mask):
         ids = np.asarray(ids)
