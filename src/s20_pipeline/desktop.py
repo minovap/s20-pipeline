@@ -13,13 +13,32 @@ from .estimate import estimate
 from .storage import atomic_json
 from .telemetry import hardware
 
+PREVIEW_MAX = 60_000_000
+
+
+def cloud_info(source):
+    """Point count and name from the file header only."""
+    source = source.resolve(strict=True)
+    if source.suffix.lower() == ".las":
+        import laspy
+
+        with laspy.open(source) as reader:
+            n = reader.header.point_count
+    elif source.suffix.lower() == ".ply":
+        from .ply import read_ply_info
+
+        n = read_ply_info(source).point_count
+    else:
+        raise ValueError("Preview currently supports uncompressed LAS or binary PLY")
+    return {"source": str(source), "name": source.name, "source_points": int(n)}
+
 
 def preview(source, cache, budget):
-    if not 10000 <= budget <= 8000000:
-        raise ValueError("Preview point budget must be 10,000–8,000,000")
+    if not 10000 <= budget <= PREVIEW_MAX:
+        raise ValueError(f"Preview point budget must be 10,000–{PREVIEW_MAX:,}")
     source = source.resolve(strict=True)
     key = hashlib.sha256(
-        f"{source}:{source.stat().st_size}:{source.stat().st_mtime_ns}:{budget}".encode()
+        f"v2:{source}:{source.stat().st_size}:{source.stat().st_mtime_ns}:{budget}".encode()
     ).hexdigest()
     dest = cache / key
     meta = dest / "preview.json"
@@ -67,9 +86,12 @@ def preview(source, cache, budget):
     count = 0
     low = np.full(3, np.inf)
     high = -low
+    # Positions as float32 and colors as 8-bit, in two files: 15 bytes per point.
     target = dest / "points.f32"
+    colors_target = dest / "colors.u8"
     temporary = dest / "points.tmp"
-    with temporary.open("wb") as stream:
+    colors_temporary = dest / "colors.tmp"
+    with temporary.open("wb") as stream, colors_temporary.open("wb") as color_stream:
         for xyz, rgb in chunks():
             ids = np.arange((-cursor) % step, len(xyz), step)
             cursor += len(xyz)
@@ -80,9 +102,11 @@ def preview(source, cache, budget):
                 continue
             low = np.minimum(low, x.min(0))
             high = np.maximum(high, x.max(0))
-            np.column_stack([x, np.clip(rgb[ids], 0, 1)]).astype("<f4").tofile(stream)
+            x.astype("<f4").tofile(stream)
+            np.rint(np.clip(rgb[ids], 0, 1) * 255).astype("u1").tofile(color_stream)
             count += len(ids)
     temporary.replace(target)
+    colors_temporary.replace(colors_target)
     result = {
         "key": key,
         "source": str(source),
@@ -91,8 +115,10 @@ def preview(source, cache, budget):
         "display_points": count,
         "origin": origin.tolist(),
         "bounds": [low.tolist(), high.tolist()],
-        "bytes": count * 24,
+        "bytes": count * 12,
+        "color_bytes": count * 3,
         "file": str(target.resolve()),
+        "colors": str(colors_target.resolve()),
         "note": "Deterministic display sample; exported source is unchanged. This is not octree LOD.",
     }
     atomic_json(meta, result)
@@ -114,7 +140,8 @@ def _chunks(source):
                     xyz = np.column_stack([points.x, points.y, points.z])
                     names = set(points.point_format.dimension_names)
                     rgb = (
-                        np.column_stack([points.red, points.green, points.blue]).astype("<f8") / 65535
+                        np.column_stack([points.red, points.green, points.blue]).astype("<f8")
+                        / 65535
                         if "red" in names
                         else None
                     )
@@ -224,7 +251,9 @@ def export_slices(spec):
                 now = time.monotonic()
                 if now - last > 0.25:
                     last = now
-                    print(json.dumps({"event": "progress", "done": done, "total": total}), flush=True)
+                    print(
+                        json.dumps({"event": "progress", "done": done, "total": total}), flush=True
+                    )
     if not written:
         temporary.unlink(missing_ok=True)
         raise ValueError("No points inside the selected slices")
@@ -238,6 +267,8 @@ def main():
     i = s.add_parser("inspect")
     i.add_argument("capture", type=Path)
     s.add_parser("hardware")
+    c = s.add_parser("info")
+    c.add_argument("source", type=Path)
     v = s.add_parser("preview")
     v.add_argument("source", type=Path)
     v.add_argument("cache", type=Path)
@@ -251,6 +282,8 @@ def main():
         result = {"capture": capture, "hardware": host, "estimate": estimate(capture, host)}
     elif a.command == "hardware":
         result = hardware()
+    elif a.command == "info":
+        result = cloud_info(a.source)
     elif a.command == "export-slices":
         result = export_slices(json.loads(a.spec.read_text()))
     else:

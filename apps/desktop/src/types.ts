@@ -76,8 +76,17 @@ export type PipelineEvent = {
 };
 export type ExportEvent = {id: string; name: string; event: 'progress' | 'completed' | 'failed' | 'cancelled'; done?: number; total?: number; file?: string; points?: number; message?: string};
 
-export type Preview = {key: string; name: string; source: string; source_points: number; display_points: number; origin: number[]; bounds: number[][]; bytes: number};
-export type Cloud = {info: Preview; data: Float32Array};
+export type Preview = {key: string; name: string; source: string; source_points: number; display_points: number; origin: number[]; bounds: number[][]; bytes: number; color_bytes: number; file: string; colors: string};
+export type CloudInfo = {source: string; name: string; source_points: number};
+/** Positions are float32 xyz local to the preview origin; colors are 8-bit rgb. */
+export type Cloud = {info: Preview; positions: Float32Array; colors: Uint8Array};
+/** Largest preview the bridge will sample. */
+export const PREVIEW_MAX = 60_000_000;
+/** Default share of a cloud to show: at least 2 M points, at least 10 %, never above the cap. */
+export function defaultBudget(sourcePoints: number): number {
+  if (sourcePoints <= 0) return 1_000_000;
+  return Math.min(sourcePoints, PREVIEW_MAX, Math.max(2_000_000, Math.round(sourcePoints * 0.1)));
+}
 
 // Stage order matches s20_pipeline.runner.stage_names. Groups give the long
 // list a shape; labels say what the step produces in plain words.

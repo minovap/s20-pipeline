@@ -82,11 +82,10 @@ export class CloudRenderer {
       if (this.entries.has(path)) continue;
       changed = true;
       if (!this.worldOrigin) this.worldOrigin = new THREE.Vector3(...(cloud.info.origin as [number, number, number]));
-      const buffer = new THREE.InterleavedBuffer(cloud.data, 6);
       const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.InterleavedBufferAttribute(buffer, 3, 0));
-      geometry.setAttribute('color', new THREE.InterleavedBufferAttribute(buffer, 3, 3));
-      const n = cloud.data.length / 6;
+      geometry.setAttribute('position', new THREE.BufferAttribute(cloud.positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(cloud.colors, 3, true));
+      const n = cloud.positions.length / 3;
       const visible = new THREE.BufferAttribute(new Float32Array(n).fill(1), 1);
       visible.setUsage(THREE.DynamicDrawUsage);
       geometry.setAttribute('visible', visible);
@@ -138,8 +137,8 @@ export class CloudRenderer {
   }
   private updateVisibleBounds(e: Entry) {
     if (!e.mask) { e.shown = true; e.visibleBounds.copy(e.bounds); return; }
-    const d = e.cloud.data, box = new THREE.Box3(), v = new THREE.Vector3(), m = e.points.matrixWorld;
-    for (let i = 0; i < e.mask.length; i++) if (e.mask[i]) box.expandByPoint(v.set(d[i * 6], d[i * 6 + 1], d[i * 6 + 2]).applyMatrix4(m));
+    const d = e.cloud.positions, box = new THREE.Box3(), v = new THREE.Vector3(), m = e.points.matrixWorld;
+    for (let i = 0; i < e.mask.length; i++) if (e.mask[i]) box.expandByPoint(v.set(d[i * 3], d[i * 3 + 1], d[i * 3 + 2]).applyMatrix4(m));
     e.shown = !box.isEmpty();
     e.visibleBounds.copy(box.isEmpty() ? e.bounds : box);
     e.points.visible = e.shown;

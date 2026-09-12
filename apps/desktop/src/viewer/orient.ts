@@ -42,7 +42,7 @@ export function transformFor(o: Orientation | undefined, origin: number[]): Tran
  * z = 0. Yaw is kept. Returns null when no plane dominates.
  */
 export function levelGround(data: Float32Array, current: Orientation): Orientation | null {
-  const n = data.length / 6;
+  const n = data.length / 3;
   if (n < 100) return null;
   // Work on points already rotated by the current orientation so a second
   // press refines rather than restarts.
@@ -50,7 +50,7 @@ export function levelGround(data: Float32Array, current: Orientation): Orientati
   const step = Math.max(1, Math.floor(n / 60000));
   const pts: THREE.Vector3[] = [];
   const v = new THREE.Vector3();
-  for (let i = 0; i < n; i += step) pts.push(v.set(data[i * 6], data[i * 6 + 1], data[i * 6 + 2]).applyQuaternion(q).clone());
+  for (let i = 0; i < n; i += step) pts.push(v.set(data[i * 3], data[i * 3 + 1], data[i * 3 + 2]).applyQuaternion(q).clone());
   let seed = 12345;
   const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
   const pick = () => pts[Math.floor(rnd() * pts.length)];

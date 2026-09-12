@@ -39,8 +39,9 @@ let project: Project = {
 };
 const other: ProjectSummary = {path: `${root}/Driveway`, name: 'Driveway', created: now - 900000, input_count: 1, run_count: 3, last_run: {...completedRun, status: 'failed', started: now - 400000}};
 
-function synthCloud(seed: number, n: number): Float32Array {
-  const data = new Float32Array(n * 6);
+function synthCloud(seed: number, n: number): {positions: Float32Array; colors: Uint8Array} {
+  const positions = new Float32Array(n * 3);
+  const colors = new Uint8Array(n * 3);
   let s = seed;
   const rnd = () => { s = (s * 1664525 + 1013904223) % 4294967296; return s / 4294967296; };
   for (let i = 0; i < n; i++) {
@@ -50,11 +51,12 @@ function synthCloud(seed: number, n: number): Float32Array {
     else if (kind < 0.8) { const t = Math.floor(rnd() * 5); const cx = [-10, -4, 3, 9, 12][t], cy = [-6, 5, -3, 6, -8][t]; const h = rnd() * 4 + 1.5; const rad = (1 - Math.abs(h - 3.5) / 3.5) * 1.8 + 0.3; const a = rnd() * Math.PI * 2; x = cx + Math.cos(a) * rad * Math.sqrt(rnd()); y = cy + Math.sin(a) * rad * Math.sqrt(rnd()); z = h; r = 0.15 + rnd() * 0.1; g = 0.35 + rnd() * 0.25; b = 0.12; }
     else if (kind < 0.93) { const along = rnd(); x = -17 + along * 34; y = 13 + (rnd() - 0.5) * 0.3; z = rnd() * 1.6; r = 0.2; g = 0.32 + rnd() * 0.15; b = 0.15; }
     else { x = 12 + rnd() * 6; y = -13 + rnd() * 9; z = rnd() * 3; const v = 0.6 + rnd() * 0.3; r = v; g = v * 0.9; b = v * 0.8; }
-    data.set([x, y, z, r, g, b], i * 6);
+    positions.set([x, y, z], i * 3);
+    colors.set([r * 255, g * 255, b * 255], i * 3);
   }
-  return data;
+  return {positions, colors};
 }
-const previews = new Map<string, Float32Array>();
+const previews = new Map<string, {positions: Float32Array; colors: Uint8Array}>();
 
 let timers: ReturnType<typeof setTimeout>[] = [];
 function simulateJob(job: Job) {
@@ -119,8 +121,14 @@ export const mockApi = {
     const data = synthCloud(source.length, n);
     previews.set(source, data);
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], data[i * 6 + k]); hi[k] = Math.max(hi[k], data[i * 6 + k]); }
-    return {key: source, name: source.split('/').pop()!, source, source_points: 6021344, display_points: n, origin: [0, 0, 0], bounds: [lo, hi], bytes: n * 24};
+    for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], data.positions[i * 3 + k]); hi[k] = Math.max(hi[k], data.positions[i * 3 + k]); }
+    return {key: source, name: source.split('/').pop()!, source, source_points: 6021344, display_points: n, origin: [0, 0, 0], bounds: [lo, hi], bytes: n * 12, color_bytes: n * 3, file: source, colors: source};
   },
-  readPreview: async (key: string) => previews.get(key)!.buffer as ArrayBuffer,
+  readPreview: async (key: string) => previews.get(key)!.positions.buffer as ArrayBuffer,
+  cloudInfo: async (source: string) => ({source, name: source.split('/').pop()!, source_points: 6021344}),
+  async loadCloud(source: string, budget: number) {
+    const info = await this.loadPreview(source, budget);
+    const data = previews.get(source)!;
+    return {info, positions: data.positions, colors: data.colors};
+  },
 };

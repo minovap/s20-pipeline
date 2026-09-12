@@ -1,6 +1,7 @@
 import laspy
 import numpy as np
 import pytest
+
 from s20_pipeline.desktop import preview
 from s20_pipeline.storage import digest
 
@@ -21,15 +22,19 @@ def test_preview_is_bounded_preserves_source_and_world_coordinates(tmp_path):
     data.write(source)
     before = digest(source)
     value = preview(source, tmp_path / "cache", 10000)
-    points = np.fromfile(value["file"], dtype="f4").reshape(-1, 6)
-    assert len(points) <= 10000 and len(points) == value["display_points"]
-    assert points.nbytes == value["bytes"]
-    assert np.max(abs(points[:, :3] + value["origin"] - data.xyz[::4])) < 1e-6
-    assert np.all(points[:, 3] == 1) and np.all(points[:, 4] == 0)
+    points = np.fromfile(value["file"], dtype="f4").reshape(-1, 3)
+    colors = np.fromfile(value["colors"], dtype="u1").reshape(-1, 3)
+    assert len(points) <= 10000 and len(points) == value["display_points"] == len(colors)
+    assert points.nbytes == value["bytes"] and colors.nbytes == value["color_bytes"]
+    assert np.max(abs(points + value["origin"] - data.xyz[::4])) < 1e-6
+    assert np.all(colors[:, 0] == 255) and np.all(colors[:, 1] == 0) and np.all(colors[:, 2] == 128)
+    from s20_pipeline.desktop import cloud_info
+
+    assert cloud_info(source)["source_points"] == n
     assert preview(source, tmp_path / "cache", 10000) == value
     assert digest(source) == before
     with pytest.raises(ValueError):
-        preview(source, tmp_path / "cache", 8000001)
+        preview(source, tmp_path / "cache", 60000001)
 
 
 def test_export_slices_writes_union_once_with_colors(tmp_path):
@@ -69,7 +74,13 @@ def test_export_slices_writes_union_once_with_colors(tmp_path):
     with pytest.raises(FileExistsError):
         export_slices(spec)
     with pytest.raises(ValueError):
-        export_slices({**spec, "output": str(tmp_path / "none.las"), "sources": [{"path": str(source), "boxes": [[[900, 900, 900], [901, 901, 901]]]}]})
+        export_slices(
+            {
+                **spec,
+                "output": str(tmp_path / "none.las"),
+                "sources": [{"path": str(source), "boxes": [[[900, 900, 900], [901, 901, 901]]]}],
+            }
+        )
 
 
 def test_export_slices_applies_orientation_transform(tmp_path):
@@ -88,7 +99,13 @@ def test_export_slices_applies_orientation_transform(tmp_path):
     rot = [0, -1, 0, 1, 0, 0, 0, 0, 1]
     spec = {
         "output": str(tmp_path / "rotated.las"),
-        "sources": [{"path": str(source), "boxes": [[[9, 9, -1], [11, 11, 1]]], "transform": {"rotation": rot, "origin": [10, 0, 0], "translation": [0, 0, 0.5]}}],
+        "sources": [
+            {
+                "path": str(source),
+                "boxes": [[[9, 9, -1], [11, 11, 1]]],
+                "transform": {"rotation": rot, "origin": [10, 0, 0], "translation": [0, 0, 0.5]},
+            }
+        ],
     }
     result = export_slices(spec)
     out = laspy.read(spec["output"])

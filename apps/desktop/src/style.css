@@ -273,6 +273,9 @@ pre.log { margin: 0 16px 8px 48px; padding: 10px 12px; background: var(--bg); bo
 .toolbar .tool.on { background: var(--amber); color: var(--accent-ink); border-color: transparent; }
 .toolbar .hint { color: var(--amber); font-size: 12px; margin-right: 4px; }
 .toolbar .size input { width: 80px; vertical-align: middle; }
+.toolbar .share { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.toolbar .share input { width: 90px; vertical-align: middle; }
+.toolbar .share b { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; min-width: 34px; }
 .toolbar select { padding: 4px 22px 4px 8px; font-size: 12px; background-color: transparent; border-color: transparent; }
 .panel-open { position: absolute; top: 10px; right: 10px; background: rgba(34, 38, 42, 0.92); border-color: var(--line); }
 .cloud-panel { position: absolute; top: 10px; right: 10px; bottom: 10px; width: 320px; display: flex; flex-direction: column; background: rgba(34, 38, 42, 0.94); border: 1px solid var(--line); border-radius: 8px; backdrop-filter: blur(8px); }

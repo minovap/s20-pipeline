@@ -7,6 +7,7 @@ import {api, errorText, listen} from '../api';
 import {basename, bytes, count, when} from '../format';
 import {ConfirmDialog, Modal, NameDialog, Segmented, Spinner, useContextMenu} from '../ui';
 import type {Box, Cloud, ExportEvent, Orientation, Project, Slice} from '../types';
+import {PREVIEW_MAX, defaultBudget} from '../types';
 import {CloudRenderer, DEPTH_AXIS, type ViewMode} from './render';
 import {children, countMask, descendants, effectiveBox, intersect, newId, nextSliceName, normalize, unionMask} from './slices';
 
@@ -27,7 +28,10 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   const [slicing, setSlicing] = useState(false);
   const [compare, setCompare] = useState<string | null>(null);
   const [pointSize, setPointSize] = useState(1.6);
-  const [budget, setBudget] = useState(() => +(localStorage.getItem('budget') ?? 1000000));
+  /** Share of each cloud to show, in percent; null means the size-based default. */
+  const [percent, setPercent] = useState<number | null>(() => { const v = localStorage.getItem('previewPercent'); return v ? +v : null; });
+  const [draftPercent, setDraftPercent] = useState<number | null>(null);
+  const [totals, setTotals] = useState<Record<string, number>>({});
   const [panel, setPanel] = useState(true);
   const [scale, setScale] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -92,16 +96,20 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
   useEffect(() => { if (renderer.current) { renderer.current.compare = compare; renderer.current.draw(); } }, [compare]);
 
   // ---- load previews for checked clouds
+  const budgetFor = useCallback((total: number) => {
+    if (percent == null) return defaultBudget(total);
+    return Math.max(10_000, Math.min(PREVIEW_MAX, total, Math.round((total * percent) / 100)));
+  }, [percent]);
   const loadCloud = useCallback(async (source: string) => {
     setLoading(l => new Set(l).add(source));
     try {
-      const info = await api.loadPreview(source, budget);
-      const raw = await api.readPreview(info.key);
-      if (raw.byteLength !== info.bytes) throw new Error('Preview data was incomplete. Try again.');
-      setClouds(c => new Map(c).set(source, {info, data: new Float32Array(raw)}));
+      const total = totals[source] ?? (await api.cloudInfo(source)).source_points;
+      setTotals(t => (t[source] === total ? t : {...t, [source]: total}));
+      const cloud = await api.loadCloud(source, budgetFor(total));
+      setClouds(c => new Map(c).set(source, cloud));
     } catch (e) { onError(errorText(e)); setChecked(c => { const n = new Set(c); n.delete(source); return n; }); }
     finally { setLoading(l => { const n = new Set(l); n.delete(source); return n; }); }
-  }, [budget, onError]);
+  }, [budgetFor, totals, onError]);
 
   useEffect(() => {
     const needed = new Set<string>();
@@ -112,7 +120,12 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     if (selected) { const slice = slices.find(s => s.id === selected); needed.add(slice ? slice.source : selected); }
     for (const source of needed) if (sources.some(s => s.path === source) && !clouds.has(source) && !loading.has(source)) void loadCloud(source);
   }, [checked, selected, slices, sources, clouds, loading, loadCloud]);
-  useEffect(() => { localStorage.setItem('budget', String(budget)); setClouds(new Map()); }, [budget]);
+  const firstPercent = useRef(true);
+  useEffect(() => {
+    if (firstPercent.current) { firstPercent.current = false; return; }
+    if (percent == null) localStorage.removeItem('previewPercent'); else localStorage.setItem('previewPercent', String(percent));
+    setClouds(new Map());
+  }, [percent]);
 
   const firstFrame = useRef(true);
   useEffect(() => {
@@ -131,8 +144,8 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     for (const [source, cloud] of clouds) {
       if (checked.has(source)) { r.setMask(source, null); continue; }
       const boxes = slices.filter(s => s.source === source && checked.has(s.id)).map(s => effectiveBox(s, slices)).filter((b): b is Box => !!b);
-      if (!boxes.length) { r.setMask(source, new Float32Array(cloud.data.length / 6)); continue; }
-      r.setMask(source, unionMask(cloud.data, cloud.info.origin, boxes, transformFor(orientations[source], cloud.info.origin)));
+      if (!boxes.length) { r.setMask(source, new Float32Array(cloud.positions.length / 3)); continue; }
+      r.setMask(source, unionMask(cloud.positions, cloud.info.origin, boxes, transformFor(orientations[source], cloud.info.origin)));
     }
     // Frame the first thing that becomes visible, after its mask is in place.
     if (firstFrame.current && clouds.size) { firstFrame.current = false; r.frameVisible(); }
@@ -146,7 +159,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
     for (const s of slices) {
       const cloud = clouds.get(s.source);
       const box = effectiveBox(s, slices);
-      if (cloud && box) out.set(s.id, countMask(unionMask(cloud.data, cloud.info.origin, [box], transformFor(orientations[s.source], cloud.info.origin))));
+      if (cloud && box) out.set(s.id, countMask(unionMask(cloud.positions, cloud.info.origin, [box], transformFor(orientations[s.source], cloud.info.origin))));
     }
     return out;
   }, [slices, clouds, orientations]);
@@ -468,9 +481,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
         {slicing && <span className="hint">{mode === 'persp' ? 'Choose Top, Front or Side' : `Drag to cut ${targetName}`}</span>}
         <span className="sep" />
         <label className="size" title="Point size"><input type="range" min={0.6} max={4} step={0.1} value={pointSize} onChange={e => setPointSize(+e.target.value)} aria-label="Point size" /></label>
-        <select value={budget} onChange={e => setBudget(+e.target.value)} aria-label="Points shown" title="How many points to show">
-          <option value={250000}>250 k points</option><option value={1000000}>1 M points</option><option value={2000000}>2 M points</option><option value={4000000}>4 M points</option><option value={8000000}>8 M points</option>
-        </select>
+        <PointShare percent={draftPercent ?? percent} clouds={clouds} totals={totals} onDraft={setDraftPercent} onCommit={v => { setDraftPercent(null); setPercent(v); }} />
         {loading.size > 0 && <Spinner />}
       </div>
       {!panel && <button className="icon panel-open" onClick={() => setPanel(true)} aria-label="Show point clouds" title="Show point clouds"><PanelRightOpen size={18} /></button>}
@@ -482,7 +493,7 @@ export function Viewer({path, focus, onBack, onError}: {path: string; focus?: st
             <div className="tree">
               <p className="pad muted">{labelFor(calibrating.source)}</p>
               <OrientationEditor orientation={calibrating.current} onChange={o => applyOrientation(calibrating.source, o)}
-                onLevel={() => { const c = clouds.get(calibrating.source); const o = c ? levelGround(c.data, calibrating.current) : null; if (o) applyOrientation(calibrating.source, o); else onError('No dominant ground plane found. Adjust roll and pitch by hand.'); }} />
+                onLevel={() => { const c = clouds.get(calibrating.source); const o = c ? levelGround(c.positions, calibrating.current) : null; if (o) applyOrientation(calibrating.source, o); else onError('No dominant ground plane found. Adjust roll and pitch by hand.'); }} />
               <p className="pad muted small">Use Front or Side to level and Top to turn. The buttons in the lower left rotate about the axis you look along. Save keeps the orientation with this cloud, Save as writes a new leveled LAS file.</p>
             </div>
           ) : (
@@ -636,6 +647,24 @@ function ExportDialog({names, defaultName, existing, onSubmit, onCancel}:
         <footer><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!ok}>Export</button></footer>
       </form>
     </Modal>
+  );
+}
+
+/** Slider for the share of points shown. The label reports the loaded clouds' shown and total counts. */
+function PointShare({percent, clouds, totals, onDraft, onCommit}:
+  {percent: number | null; clouds: Map<string, Cloud>; totals: Record<string, number>; onDraft: (v: number) => void; onCommit: (v: number | null) => void}) {
+  const shown = [...clouds.values()].reduce((n, c) => n + c.info.display_points, 0);
+  const total = [...clouds.keys()].reduce((n, k) => n + (totals[k] ?? clouds.get(k)!.info.source_points), 0);
+  // The slider position follows the actual share when the size-based default is in use.
+  const value = percent ?? (total ? Math.max(1, Math.round((100 * shown) / total)) : 10);
+  const label = clouds.size ? `${count(shown)} of ${count(total)} points` : 'Points shown';
+  return (
+    <label className="share" title="Share of each point cloud to show. Higher is slower to load and draw.">
+      <span>{label}</span>
+      <input type="range" min={1} max={100} step={1} value={value} aria-label="Share of points shown"
+        onChange={e => onDraft(+e.target.value)} onPointerUp={e => onCommit(+(e.target as HTMLInputElement).value)} onKeyUp={e => onCommit(+(e.target as HTMLInputElement).value)} />
+      <b>{value}%</b>
+    </label>
   );
 }
 

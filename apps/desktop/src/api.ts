@@ -1,9 +1,9 @@
 // Typed wrappers around the Rust commands. Everything that touches disk or
 // spawns a process lives behind one of these.
-import {invoke, isTauri} from '@tauri-apps/api/core';
+import {convertFileSrc, invoke, isTauri} from '@tauri-apps/api/core';
 import {listen as tauriListen} from '@tauri-apps/api/event';
 import {open} from '@tauri-apps/plugin-dialog';
-import type {Box, Hardware, Job, Preview, Project, ProjectSummary, Settings} from './types';
+import type {Box, Cloud, CloudInfo, Hardware, Job, Preview, Project, ProjectSummary, Settings} from './types';
 
 export const inTauri = isTauri();
 /** Browser review mode: `?mock` on the Vite dev server swaps in fake data. */
@@ -37,8 +37,27 @@ const real = {
 
   loadPreview: (source: string, budget: number) => invoke<Preview>('load_preview', {source, budget}),
   readPreview: (key: string) => invoke<ArrayBuffer>('read_preview', {key}),
+  cloudInfo: (source: string) => invoke<CloudInfo>('cloud_info', {source}),
+  /** Sample a cloud and read its two preview files. */
+  async loadCloud(source: string, budget: number): Promise<Cloud> {
+    const info = await this.loadPreview(source, budget);
+    const [positions, colors] = await Promise.all([readFile(info.file, info.key, info.bytes), readFile(info.colors, `${info.key}:colors`, info.color_bytes)]);
+    return {info, positions: new Float32Array(positions), colors: new Uint8Array(colors)};
+  },
 };
 export const api: typeof real = mock ? (await import('./mock')).mockApi as unknown as typeof real : real;
+
+/** Large files stream through the asset protocol; IPC is the fallback. */
+async function readFile(path: string, key: string, expected: number): Promise<ArrayBuffer> {
+  let raw: ArrayBuffer | null = null;
+  try {
+    const response = await fetch(convertFileSrc(path));
+    if (response.ok) raw = await response.arrayBuffer();
+  } catch { raw = null; }
+  if (!raw || raw.byteLength !== expected) raw = await invoke<ArrayBuffer>('read_preview', {key});
+  if (raw.byteLength !== expected) throw new Error('Preview data was incomplete. Try again.');
+  return raw;
+}
 
 /** Subscribe to a shell event. Returns an unsubscribe function once ready. */
 export async function listen<T>(name: string, fn: (payload: T) => void): Promise<() => void> {

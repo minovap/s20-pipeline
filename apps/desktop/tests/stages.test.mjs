@@ -49,21 +49,21 @@ test('slice boxes intersect along the parent chain', () => {
 });
 test('union mask shows a point once even when boxes overlap', () => {
   // three points at x = 1, 6, 12 (local), origin 100 on x
-  const data = new Float32Array([1, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0]);
+  const data = new Float32Array([1, 0, 0, 6, 0, 0, 12, 0, 0]);
   const mask = unionMask(data, [100, 0, 0], [[[100, -1, -1], [107, 1, 1]], [[105, -1, -1], [110, 1, 1]]]);
   assert.deepEqual([...mask], [1, 1, 0]);
 });
 
 test('level ground finds a tilted plane and puts it at height 0', async () => {
   const {levelGround, IDENTITY, rotationMatrix} = await import('../src/viewer/orient.ts');
-  const n = 4000, data = new Float32Array(n * 6);
+  const n = 4000, data = new Float32Array(n * 3);
   // Plane tilted 5 degrees about x, offset 2 m up, plus some scattered noise points above it.
   const tilt = 5 * Math.PI / 180;
   for (let i = 0; i < n; i++) {
     const x = (i % 63) - 31, y = Math.floor(i / 63) - 31;
     const onPlane = i % 10 !== 0;
     const z = onPlane ? 2 + Math.tan(tilt) * y : 2 + Math.tan(tilt) * y + 1 + (i % 7);
-    data.set([x, y, z, 0.5, 0.5, 0.5], i * 6);
+    data.set([x, y, z], i * 3);
   }
   const o = levelGround(data, IDENTITY);
   assert(o, 'plane found');
@@ -116,4 +116,13 @@ test('small steps fold into the next real step for display', async () => {
   assert.equal(failed[0].status, 'failed'); assert.equal(failed[0].logStage, 'global');
   // geometry-only runs have no host for the color steps; nothing is lost
   assert.deepEqual(foldStages([st('decode', 'complete'), st('geometry', 'pending')]).map(r => r.id), ['decode', 'geometry']);
+});
+
+
+test('default point share grows with the cloud but stays bounded', async () => {
+  const {defaultBudget, PREVIEW_MAX} = await import('../src/types.ts');
+  assert.equal(defaultBudget(500000), 500000);      // small clouds show everything
+  assert.equal(defaultBudget(6000000), 2000000);    // at least 2 M
+  assert.equal(defaultBudget(122000000), 12200000); // 10 % of a big cloud
+  assert.equal(defaultBudget(900000000), PREVIEW_MAX);
 });

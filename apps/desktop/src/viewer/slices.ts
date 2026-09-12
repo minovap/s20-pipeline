@@ -42,11 +42,11 @@ export function descendants(id: string, all: Slice[]): Slice[] {
 }
 
 /**
- * Points inside any box are visible. Positions are interleaved (x,y,z,r,g,b)
- * and local to `origin`; with a transform, world = R·local + origin + t.
+ * Points inside any box are visible. Positions are xyz triples local to
+ * `origin`; with a transform, world = R·local + origin + t.
  */
 export function unionMask(data: Float32Array, origin: number[], boxes: Box[], transform?: Transform | null, out?: Float32Array): Float32Array {
-  const n = data.length / 6;
+  const n = data.length / 3;
   const mask = out && out.length === n ? out : new Float32Array(n);
   mask.fill(0);
   const shift = transform ? [origin[0] + transform.translation[0], origin[1] + transform.translation[1], origin[2] + transform.translation[2]] : origin;
@@ -56,7 +56,7 @@ export function unionMask(data: Float32Array, origin: number[], boxes: Box[], tr
   ]);
   const r = transform?.rotation;
   for (let i = 0; i < n; i++) {
-    let x = data[i * 6], y = data[i * 6 + 1], z = data[i * 6 + 2];
+    let x = data[i * 3], y = data[i * 3 + 1], z = data[i * 3 + 2];
     if (r) { const px = x, py = y, pz = z; x = r[0] * px + r[1] * py + r[2] * pz; y = r[3] * px + r[4] * py + r[5] * pz; z = r[6] * px + r[7] * py + r[8] * pz; }
     for (const b of local) {
       if (x >= b[0] && x <= b[3] && y >= b[1] && y <= b[4] && z >= b[2] && z <= b[5]) { mask[i] = 1; break; }

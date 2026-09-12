@@ -1066,21 +1066,35 @@ async fn load_preview(
         .canonicalize()
         .map_err(|e| e.to_string())?;
     let path = path.canonicalize().map_err(|e| e.to_string())?;
-    if !path.starts_with(allowed) {
+    if !path.starts_with(&allowed) {
         return Err("Preview outside cache".into());
     }
     let mut paths = state.previews.lock().map_err(|e| e.to_string())?;
     if paths.len() > 8 {
         paths.clear();
     }
-    paths.insert(value["key"].as_str().ok_or("No preview key")?.into(), path);
+    let key = value["key"].as_str().ok_or("No preview key")?.to_string();
+    if let Some(colors) = value["colors"].as_str() {
+        let colors = PathBuf::from(colors).canonicalize().map_err(|e| e.to_string())?;
+        if colors.starts_with(&allowed) { paths.insert(format!("{key}:colors"), colors); }
+    }
+    paths.insert(key, path);
     Ok(value)
 }
+/// Header-only point count and name of a LAS or PLY file.
+#[tauri::command]
+async fn cloud_info(source: String, state: State<'_, Engine>) -> Result<Value, String> {
+    let p = root(&state)?;
+    tauri::async_runtime::spawn_blocking(move || bridge(p, vec!["info".into(), source]))
+        .await
+        .map_err(|e| e.to_string())?
+}
+/// Fallback when the asset protocol is unavailable; large previews normally load through it.
 #[tauri::command]
 fn read_preview(key: String, state: State<Engine>) -> Result<tauri::ipc::Response, String> {
     let paths = state.previews.lock().map_err(|e| e.to_string())?;
     let p = paths.get(&key).ok_or("Preview expired; load again")?;
-    if fs::metadata(p).map_err(|e| e.to_string())?.len() > 8_000_000 * 24 {
+    if fs::metadata(p).map_err(|e| e.to_string())?.len() > 60_000_000 * 12 {
         return Err("Preview exceeds budget".into());
     }
     Ok(tauri::ipc::Response::new(
@@ -1161,7 +1175,8 @@ fn main() {
             export_slices,
             cancel_export,
             load_preview,
-            read_preview
+            read_preview,
+            cloud_info
         ])
         .build(tauri::generate_context!())
         .expect("Unable to start S20 Studio")
